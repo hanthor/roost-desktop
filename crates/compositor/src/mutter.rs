@@ -3,10 +3,10 @@
 //! xdg-desktop-portal-gnome shares screens by asking Mutter, over D-Bus:
 //! `org.gnome.Mutter.DisplayConfig` lists the monitors for its picker,
 //! and `org.gnome.Mutter.ScreenCast` hands back a PipeWire node per
-//! stream. Roost serves both, so browsers and video calls share screens
+//! stream. Tuna Desktop serves both, so browsers and video calls share screens
 //! through the stock GNOME portal. Adapted from niri's
 //! `src/dbus/mutter_screen_cast.rs` and `mutter_display_config.rs`
-//! (GPL-3.0-or-later, like Roost): monitor, area and window streams. Window
+//! (GPL-3.0-or-later, like Tuna Desktop): monitor, area and window streams. Window
 //! ids are the ones `org.gnome.Shell.Introspect` lists (`introspect.rs`).
 //!
 //! The D-Bus side runs on its own thread; casts start and stop on the
@@ -870,7 +870,7 @@ pub fn start(
 ) -> calloop::channel::Channel<ToLoop> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
-        .name("roost-mutter-dbus".into())
+        .name("tuna-mutter-dbus".into())
         .spawn(move || {
             let display_config = DisplayConfig {
                 outputs: outputs.clone(),
@@ -910,7 +910,7 @@ pub fn start(
             {
                 Ok(conn) => conn,
                 Err(e) => {
-                    eprintln!("roost-compositor: mutter D-Bus: no session bus: {e}");
+                    eprintln!("tuna-compositor: mutter D-Bus: no session bus: {e}");
                     return;
                 }
             };
@@ -923,10 +923,10 @@ pub fn start(
             ] {
                 match conn.request_name_with_flags(name, flags) {
                     Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
-                        eprintln!("roost-compositor: serving {name}");
+                        eprintln!("tuna-compositor: serving {name}");
                     }
                     _ => {
-                        eprintln!("roost-compositor: {name} is taken; screen sharing off");
+                        eprintln!("tuna-compositor: {name} is taken; screen sharing off");
                         return;
                     }
                 }
@@ -1101,6 +1101,6 @@ mod tests {
         assert!(is_laptop_panel("eDP-1"));
         assert!(is_laptop_panel("LVDS-1"));
         assert!(!is_laptop_panel("HDMI-A-1"));
-        assert!(!is_laptop_panel("roost-0"));
+        assert!(!is_laptop_panel("tuna-0"));
     }
 }

@@ -1,10 +1,10 @@
-# Every Wayland global GNOME 51's Mutter advertises, and what Roost must
-# offer of it (P-SY-06, #89). Read by scripts/roost-wayland-info-compare;
-# the proof stage G-WAYLAND-INFO runs it against wayland-info on Roost.
+# Every Wayland global GNOME 51's Mutter advertises, and what Tuna Desktop must
+# offer of it (P-SY-06, #89). Read by scripts/tuna-wayland-info-compare;
+# the proof stage G-WAYLAND-INFO runs it against wayland-info on Tuna Desktop.
 #
 # source "capture": tests/protocols/gnome51-wayland-info.txt, wayland-info
 #   against gnome-shell 51.0 / mutter 51.0 (Fedora 45, headless, 1280x800;
-#   scripts/roost-gnome-wayland-info). Versions are the captured ones.
+#   scripts/tuna-gnome-wayland-info). Versions are the captured ones.
 # source "source": not in the headless capture; the interface is compiled
 #   into that same libmutter-51.so (its strings) and Mutter advertises it
 #   only on the native KMS backend or to Xwayland. Version not captured:
@@ -12,7 +12,7 @@
 # zwp_linux_dmabuf_v1 is v3 headless; on the native backend Mutter adds
 #   dmabuf feedback (v4+), which this capture cannot show.
 #
-# interface	GNOME version	source	roost (match | min:<v> | gap:<ref> | absent:<why>)
+# interface	GNOME version	source	tuna (match | min:<v> | gap:<ref> | absent:<why>)
 wl_compositor	6	capture	match
 wl_shm	2	capture	match
 wl_output	4	capture	match

@@ -1,4 +1,4 @@
-# roost-greeter-control
+# tuna-greeter-control
 
 The shared schema and IPC client for the greetd conversation: prompt state
 machine, greetd JSON-IPC client, and session types.
@@ -13,4 +13,4 @@ Its only dependency is `greetd_ipc`.
 
 ## Dependents
 
-`roost-greeter` and `roost-compositor`.
+`tuna-greeter` and `tuna-compositor`.

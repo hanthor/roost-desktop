@@ -8,7 +8,7 @@ use std::thread;
 
 use fake_greetd::{auth_error, run_script, secret_prompt, visible_prompt, Step};
 use greetd_ipc::Response;
-use roost_greeter::{
+use tuna_greeter::{
     client::GreeterClient,
     model::{GreeterModel, ModelEvent},
 };
@@ -50,9 +50,9 @@ fn success_exchange_signs_in() {
     assert_eq!(event, ModelEvent::Authenticated);
     model.mark_session_starting();
     client
-        .start_session(vec!["roost-session".into()], vec![])
+        .start_session(vec!["tuna-session".into()], vec![])
         .unwrap();
-    assert_eq!(model.screen, roost_greeter::model::Screen::Launching);
+    assert_eq!(model.screen, tuna_greeter::model::Screen::Launching);
     handle.join().unwrap();
 }
 
@@ -124,7 +124,7 @@ fn multi_prompt_password_plus_token() {
     let e3 = model.apply_response(&client.answer(Some("123456".into())).unwrap());
     assert_eq!(e3, ModelEvent::Authenticated);
     client
-        .start_session(vec!["roost-session".into()], vec![])
+        .start_session(vec!["tuna-session".into()], vec![])
         .unwrap();
     handle.join().unwrap();
 }
@@ -154,7 +154,7 @@ fn session_crash_after_start_is_observable() {
     let event = model.apply_response(&client.create_session("ada").unwrap());
     assert_eq!(event, ModelEvent::Authenticated);
     client
-        .start_session(vec!["roost-session".into()], vec![])
+        .start_session(vec!["tuna-session".into()], vec![])
         .unwrap();
     model.mark_session_starting();
     // The dead session shows up as a broken conversation: with the
@@ -170,8 +170,8 @@ fn session_crash_after_start_is_observable() {
 #[test]
 fn fixture_dir_enumerates_with_default() {
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let out = roost_greeter::session::enumerate_dirs(&[&dir]);
+    let out = tuna_greeter::session::enumerate_dirs(&[&dir]);
     assert_eq!(out.entries.len(), 2);
-    assert_eq!(out.entries[0].name, "Roost");
+    assert_eq!(out.entries[0].name, "Tuna Desktop");
     assert_eq!(out.skipped, 1);
 }

@@ -1,89 +1,89 @@
-# Roost preview layer on TunaOS Marlin (#69).
+# Tuna Desktop (formerly Roost) preview layer on TunaOS Marlin (#69).
 #
 # Marlin is TunaOS's Arch-based bootc variant and the parity baseline's
 # home: ghcr.io/tuna-os/marlin:gnome ships GNOME 51. This image adds the
-# Roost Arch package on top of that exact base, so the reference session
-# (GNOME 51) and the candidate (Roost) share one image, one kernel, one
+# Tuna Desktop Arch package on top of that exact base, so the reference session
+# (GNOME 51) and the candidate (Tuna Desktop) share one image, one kernel, one
 # Mesa, and one VM profile.
 #
-# The login screen offers "Roost (preview)" beside GNOME: the DRM/KMS
+# The login screen offers "Tuna Desktop (preview)" beside GNOME: the DRM/KMS
 # backend runs the hardware session (#52), the lock screen unlocks
-# through PAM under GDM (/etc/pam.d/roost-lock, #62), and the power menu
-# logs out back to GDM. The "Roost (nested preview)" launcher stays for
-# trying Roost in a window inside GNOME. The GTK4/libadwaita shell is
+# through PAM under GDM (/etc/pam.d/tuna-lock, #62), and the power menu
+# logs out back to GDM. The "Tuna Desktop (nested preview)" launcher stays for
+# trying Tuna Desktop in a window inside GNOME. The GTK4/libadwaita shell is
 # the default shell.
 #
 # Build (CI does this with the package from packaging/arch):
 #   podman build -f packaging/marlin/Containerfile \
-#       --build-arg ROOST_PKG=roost-X.Y.Z-1-x86_64.pkg.tar.zst .
+#       --build-arg TUNA_PKG=tuna-X.Y.Z-1-x86_64.pkg.tar.zst .
 
 ARG BASE_IMAGE=ghcr.io/tuna-os/marlin:gnome
 FROM ${BASE_IMAGE}
 
-ARG ROOST_PKG
+ARG TUNA_PKG
 ARG PERF_PINNED_BASELINE=false
-ARG ROOST_PKG_SHA256
-COPY ${ROOST_PKG} /tmp/roost.pkg.tar.zst
-COPY packaging/marlin/roost-nested-preview.desktop /tmp/roost-nested-preview.desktop
-COPY packaging/marlin/roost-portals.conf /usr/share/xdg-desktop-portal/roost-portals.conf
-COPY --chmod=0755 packaging/marlin/roost-image-kernels /usr/libexec/roost-image-kernels
-COPY --chmod=0755 packaging/marlin/roost-pinned-baseline /usr/libexec/roost-pinned-baseline
+ARG TUNA_PKG_SHA256
+COPY ${TUNA_PKG} /tmp/tuna.pkg.tar.zst
+COPY packaging/marlin/tuna-nested-preview.desktop /tmp/tuna-nested-preview.desktop
+COPY packaging/marlin/tuna-portals.conf /usr/share/xdg-desktop-portal/tuna-portals.conf
+COPY --chmod=0755 packaging/marlin/tuna-image-kernels /usr/libexec/tuna-image-kernels
+COPY --chmod=0755 packaging/marlin/tuna-pinned-baseline /usr/libexec/tuna-pinned-baseline
 
 # Install the shell integrations explicitly: the base can omit calendar
 # libraries, portal backends and the optional screen-recording plugins.
 # Refresh, upgrade, and install dependencies in one coherent transaction.
 # Both desktop sessions share the resulting image's packages and kernel.
 RUN set -eux; \
-    if test -n "${ROOST_PKG_SHA256:-}"; then \
-        test "${#ROOST_PKG_SHA256}" = 64 && \
-        case "$ROOST_PKG_SHA256" in *[!0-9a-f]*) exit 1 ;; esac && \
-        sha256sum /tmp/roost.pkg.tar.zst && \
-        printf '%s  /tmp/roost.pkg.tar.zst\n' "$ROOST_PKG_SHA256" | sha256sum -c -; \
+    if test -n "${TUNA_PKG_SHA256:-}"; then \
+        test "${#TUNA_PKG_SHA256}" = 64 && \
+        case "$TUNA_PKG_SHA256" in *[!0-9a-f]*) exit 1 ;; esac && \
+        sha256sum /tmp/tuna.pkg.tar.zst && \
+        printf '%s  /tmp/tuna.pkg.tar.zst\n' "$TUNA_PKG_SHA256" | sha256sum -c -; \
     else test "$PERF_PINNED_BASELINE" = false; fi \
     && case "$PERF_PINNED_BASELINE" in \
         false) pacman -Syu --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
-        true) /usr/libexec/roost-pinned-baseline && \
+        true) /usr/libexec/tuna-pinned-baseline && \
             pacman -S --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
         *) exit 1 ;; \
     esac \
-    && pacman -U --noconfirm /tmp/roost.pkg.tar.zst \
+    && pacman -U --noconfirm /tmp/tuna.pkg.tar.zst \
     && if test "$PERF_PINNED_BASELINE" = false; then \
-        /usr/libexec/roost-image-kernels preview; \
-    else /usr/libexec/roost-pinned-baseline; fi \
-    && sed -i 's/^Name=Roost$/Name=Roost (preview)/' /usr/share/wayland-sessions/roost.desktop \
-    && install -Dm0644 /tmp/roost-nested-preview.desktop \
-        /usr/share/applications/roost-nested-preview.desktop \
-    && rm -f /tmp/roost.pkg.tar.zst /tmp/roost-nested-preview.desktop \
-    && pacman -Q roost \
-    && pacman -Ql roost \
-    && ls -l /usr/bin/roost-compositor /usr/bin/roost-shell-gtk \
-    && for bin in roost-compositor roost-shell-gtk; do \
-        printf 'Roost installed executable diagnostic: %s\n' "$bin"; \
+        /usr/libexec/tuna-image-kernels preview; \
+    else /usr/libexec/tuna-pinned-baseline; fi \
+    && sed -i -E 's/^Name=(Tuna Desktop|Roost)$/Name=Tuna Desktop (preview)/' /usr/share/wayland-sessions/tuna.desktop \
+    && install -Dm0644 /tmp/tuna-nested-preview.desktop \
+        /usr/share/applications/tuna-nested-preview.desktop \
+    && rm -f /tmp/tuna.pkg.tar.zst /tmp/tuna-nested-preview.desktop \
+    && pacman -Q tuna-desktop \
+    && pacman -Ql tuna-desktop \
+    && ls -l /usr/bin/tuna-compositor /usr/bin/tuna-shell-gtk \
+    && for bin in tuna-compositor tuna-shell-gtk; do \
+        printf 'Tuna Desktop installed executable diagnostic: %s\n' "$bin"; \
         command -v "$bin" && test -f "/usr/bin/$bin" && test -x "/usr/bin/$bin" && \
         sha256sum "/usr/bin/$bin" && ldd "/usr/bin/$bin" && "$bin" --version || exit 1; \
     done \
-    && grep -qx 'Name=Roost (preview)' /usr/share/wayland-sessions/roost.desktop \
-    && test -f /usr/lib/systemd/user/roost-session.target \
-    && test -f /etc/pam.d/roost-lock \
+    && grep -qx 'Name=Tuna Desktop (preview)' /usr/share/wayland-sessions/tuna.desktop \
+    && test -f /usr/lib/systemd/user/tuna-session.target \
+    && test -f /etc/pam.d/tuna-lock \
     && test -x /usr/lib/gnome-shell-calendar-server \
-    && ldd /usr/lib/gnome-shell-calendar-server >/tmp/roost-calendar.ldd \
-    && cat /tmp/roost-calendar.ldd \
-    && ! grep -q 'not found' /tmp/roost-calendar.ldd \
-    && rm -f /tmp/roost-calendar.ldd \
-    && test -f /usr/share/xdg-desktop-portal/roost-portals.conf \
+    && ldd /usr/lib/gnome-shell-calendar-server >/tmp/tuna-calendar.ldd \
+    && cat /tmp/tuna-calendar.ldd \
+    && ! grep -q 'not found' /tmp/tuna-calendar.ldd \
+    && rm -f /tmp/tuna-calendar.ldd \
+    && test -f /usr/share/xdg-desktop-portal/tuna-portals.conf \
     && if test "$PERF_PINNED_BASELINE" = true; then \
-        pacman -Q > /tmp/roost-preview-packages-unsorted.txt; \
-        LC_ALL=C sort /tmp/roost-preview-packages-unsorted.txt > /tmp/roost-preview-packages.txt; \
-        LC_ALL=C join -a 1 -e MISSING -o 1.1,1.2,2.2 /usr/share/roost-perf-baseline-packages.txt /tmp/roost-preview-packages.txt \
-            > /tmp/roost-preview-package-join.txt; \
-        awk '$2 != $3 { print "changed baseline package:", $0; bad=1 } END { exit bad }' /tmp/roost-preview-package-join.txt; \
-        sha256sum -c /usr/share/roost-perf-baseline-critical.sha256; \
-        rm /tmp/roost-preview-packages-unsorted.txt /tmp/roost-preview-packages.txt /tmp/roost-preview-package-join.txt; \
+        pacman -Q > /tmp/tuna-preview-packages-unsorted.txt; \
+        LC_ALL=C sort /tmp/tuna-preview-packages-unsorted.txt > /tmp/tuna-preview-packages.txt; \
+        LC_ALL=C join -a 1 -e MISSING -o 1.1,1.2,2.2 /usr/share/tuna-perf-baseline-packages.txt /tmp/tuna-preview-packages.txt \
+            > /tmp/tuna-preview-package-join.txt; \
+        awk '$2 != $3 { print "changed baseline package:", $0; bad=1 } END { exit bad }' /tmp/tuna-preview-package-join.txt; \
+        sha256sum -c /usr/share/tuna-perf-baseline-critical.sha256; \
+        rm /tmp/tuna-preview-packages-unsorted.txt /tmp/tuna-preview-packages.txt /tmp/tuna-preview-package-join.txt; \
     fi
 
-LABEL org.opencontainers.image.title="marlin-roost-preview" \
-      org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Roost as a login-screen and nested preview" \
-      org.opencontainers.image.source="https://github.com/hanthor/roost-desktop" \
+LABEL org.opencontainers.image.title="marlin-tuna-preview" \
+      org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Tuna Desktop as a login-screen and nested preview" \
+      org.opencontainers.image.source="https://github.com/tuna-os/tuna-desktop" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 
 RUN bootc container lint || true

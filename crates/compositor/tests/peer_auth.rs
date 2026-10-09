@@ -12,17 +12,17 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
 
-use roost_compositor::control::{
+use tuna_compositor::control::{
     is_private_dir, our_uid, ControlHub, PeerCred, PeerGate, MAX_PENDING_PEERS,
 };
-use roost_compositor::state::{StateModel, TokenStore};
-use roost_shell_control::{encode_frame, Message, ProtocolVersion};
+use tuna_compositor::state::{StateModel, TokenStore};
+use tuna_shell_control::{encode_frame, Message, ProtocolVersion};
 
 const SEAT: &str = "seat0";
 
 fn bind() -> (tempfile::TempDir, ControlHub, std::path::PathBuf) {
     let dir = private_tempdir();
-    let path = dir.path().join("roost-test.control");
+    let path = dir.path().join("tuna-test.control");
     let hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT).unwrap();
     (dir, hub, path)
 }
@@ -172,7 +172,7 @@ fn bind_refuses_a_shared_directory() {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
     assert!(!is_private_dir(dir.path()));
     let Err(err) = ControlHub::bind(
-        dir.path().join("roost-test.control"),
+        dir.path().join("tuna-test.control"),
         Rc::new(TokenStore::new()),
         SEAT,
     ) else {

@@ -331,8 +331,8 @@ fn plugin(service: &str) -> Option<(String, bool)> {
         "/usr/lib/x86_64-linux-gnu/NetworkManager/VPN".to_owned(),
         "/etc/NetworkManager/VPN".to_owned(),
     ];
-    if std::env::var_os("ROOST_NM_VPN_PROOF").is_some() {
-        if let Ok(dir) = std::env::var("ROOST_NM_VPN_PLUGIN_DIR") {
+    if std::env::var_os("TUNA_NM_VPN_PROOF").is_some() {
+        if let Ok(dir) = std::env::var("TUNA_NM_VPN_PLUGIN_DIR") {
             dirs.insert(0, dir);
         }
     }

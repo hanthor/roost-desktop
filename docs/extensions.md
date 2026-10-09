@@ -1,4 +1,4 @@
-# Roost extensions
+# Tuna Desktop extensions
 
 Small Rhai scripts that extend the shell without rebuilding it: bar
 cells, dock badges, and user-visible notes.
@@ -6,7 +6,7 @@ cells, dock badges, and user-visible notes.
 ## Install
 
 Copy a `.rhai` file into the extension directory
-(`~/.local/share/roost/extensions/` by default; follows
+(`~/.local/share/tuna/extensions/` by default; follows
 `XDG_DATA_HOME`). The shell loads it on the next update pass — no
 restart. Editing or deleting the file applies the same way.
 

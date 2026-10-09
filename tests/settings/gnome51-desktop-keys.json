@@ -1,5 +1,5 @@
 {
-  "source": "gsettings-desktop-schemas-51.0-1.fc45.x86_64 in localhost/roost-gnome51-reference",
+  "source": "gsettings-desktop-schemas-51.0-1.fc45.x86_64 in localhost/tuna-gnome51-reference",
   "keys": [
     {
       "schema": "org.gnome.desktop.a11y",

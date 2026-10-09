@@ -7,9 +7,9 @@ toggle button: System
 frame: Search
 entry: Search
 frame: Dash
-push button: roost-test-alpha
-push button: roost-test-beta
-push button: roost-test-gamma
+push button: tuna-test-alpha
+push button: tuna-test-beta
+push button: tuna-test-gamma
 toggle button: Show Apps
 frame: Window Previews
 push button: Close

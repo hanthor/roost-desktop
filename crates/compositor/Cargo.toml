@@ -1,5 +1,5 @@
 [package]
-name = "roost-compositor"
+name = "tuna-compositor"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -26,13 +26,13 @@ rand.workspace = true
 wayland-protocols.workspace = true
 wayland-server.workspace = true
 wayland-scanner = "=0.31.11"
-roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
-# The unlock path uses the shared greeter prompt model and greetd client from roost-greeter-control.
-roost-greeter-control = { path = "../greeter-control-schema", version = "0.1.0" }
+tuna-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+# The unlock path uses the shared greeter prompt model and greetd client from tuna-greeter-control.
+tuna-greeter-control = { path = "../greeter-control-schema", version = "0.1.0" }
 greetd_ipc.workspace = true
 image.workspace = true
 tempfile = "3"
-roost-wallpaper = { path = "../wallpaper" }
+tuna-wallpaper = { path = "../wallpaper" }
 serde_json.workspace = true
 rustix.workspace = true
 # GNOME51 RemoteDesktop.ConnectToEIS: bounded, revocable input transport.

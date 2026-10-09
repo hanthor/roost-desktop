@@ -34,12 +34,12 @@ class InstalledPolicy(unittest.TestCase):
                 after = tail[:]
                 if reads[key] == 2 and changed_field in ('start', 'parent'):
                     after[19 if changed_field == 'start' else 1] = '999'
-                return '99 (roost-compositor) ' + ' '.join(after)
+                return '99 (tuna-compositor) ' + ' '.join(after)
             if key == 'status':
                 uid = 999 if reads[key] == 2 and changed_field == 'uid' else 1000
                 return 'Uid:\t' + '\t'.join([str(uid)] * 4) + '\n'
             raise AssertionError('unexpected process read')
-        links = ['/usr/bin/roost-compositor'] * 2
+        links = ['/usr/bin/tuna-compositor'] * 2
         if changed_field == 'exe':
             links[1] = '/usr/bin/replaced'
         with patch.object(Path, 'read_text', text), patch.object(os, 'getuid', return_value=1000), \
@@ -47,7 +47,7 @@ class InstalledPolicy(unittest.TestCase):
              patch.object(os, 'fstat', return_value=executed), patch.object(os, 'stat', return_value=current), \
              patch.object(os, 'close') as closed, patch.object(M, 'digest', return_value=original) as digest:
             try:
-                return M.process(99, 'roost-compositor', {'roost-compositor': original})
+                return M.process(99, 'tuna-compositor', {'tuna-compositor': original})
             finally:
                 opened.assert_called_once_with(Path('/proc/99/exe'), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
                 closed.assert_called_once_with(50)
@@ -79,7 +79,7 @@ class InstalledPolicy(unittest.TestCase):
             M.run(['/usr/bin/python3', '-c', 'print("x"*65537)'])
 
     def test_override_refused_before_package_commands(self):
-        with patch.object(os, 'getuid', return_value=1000), patch.dict(os.environ, {'ROOST_SHELL_BIN': '/tmp/wrong'}), patch.object(M, 'run') as run:
+        with patch.object(os, 'getuid', return_value=1000), patch.dict(os.environ, {'TUNA_SHELL_BIN': '/tmp/wrong'}), patch.object(M, 'run') as run:
             with self.assertRaisesRegex(ValueError, 'route-override'):
                 M.preflight()
             run.assert_not_called()
@@ -92,7 +92,7 @@ class InstalledPolicy(unittest.TestCase):
 
     def test_pid_bool_refused(self):
         with self.assertRaisesRegex(ValueError, 'pid-type'):
-            M.process(True, 'roost-compositor', {})
+            M.process(True, 'tuna-compositor', {})
 
     def test_unowned_library_fatal(self):
         with patch.object(M, 'run', side_effect=subprocess.CalledProcessError(1, ['dpkg-query'])):
@@ -140,26 +140,26 @@ class InstalledPolicy(unittest.TestCase):
 
     def test_companion_wrong_commit_refused(self):
         def command(args):
-            if args == ['dpkg', '--verify', 'roost']:
+            if args == ['dpkg', '--verify', 'tuna-desktop']:
                 return ''
             if args[0] == 'git':
                 return 'a' * 40
-            if args[0].startswith('/usr/bin/roost-'):
+            if args[0].startswith('/usr/bin/tuna-'):
                 return Path(args[0]).name + ' 0.1.0'
             return '0.1.0'
-        with patch.object(os, 'getuid', return_value=1000), patch.dict(os.environ, {}, clear=True), patch.object(Path, 'read_text', return_value='ID=ubuntu\nVERSION_ID="26.04"\n'), patch.object(M, 'run', side_effect=command), patch.object(M, 'owner', return_value={'name': 'roost', 'version': '0.1.0'}), patch.object(M, 'digest', return_value={'sha256': '0' * 64}), patch.object(M, 'bounded_json', return_value={'commit': 'b' * 40, 'files': {'icon-probe': '0' * 64, 'shortcut-inhibit-client': '0' * 64}}):
+        with patch.object(os, 'getuid', return_value=1000), patch.dict(os.environ, {}, clear=True), patch.object(Path, 'read_text', return_value='ID=ubuntu\nVERSION_ID="26.04"\n'), patch.object(M, 'run', side_effect=command), patch.object(M, 'owner', return_value={'name': 'tuna-desktop', 'version': '0.1.0'}), patch.object(M, 'digest', return_value={'sha256': '0' * 64}), patch.object(M, 'bounded_json', return_value={'commit': 'b' * 40, 'files': {'icon-probe': '0' * 64, 'shortcut-inhibit-client': '0' * 64}}):
             with self.assertRaisesRegex(ValueError, 'companion-source-contract'):
                 M.preflight()
 
     def test_original_session_and_replacement_contract(self):
         base = {'files': {}}
-        compositor = {'pid': 100, 'exe': '/usr/bin/roost-compositor'}
+        compositor = {'pid': 100, 'exe': '/usr/bin/tuna-compositor'}
         shell = {'pid': 101, 'parent': 100}
-        sockets = {n: {'pid': 100} for n in ('owned', 'roost-owned.control')}
+        sockets = {n: {'pid': 100} for n in ('owned', 'tuna-owned.control')}
         previous = {'compositor': compositor, 'shell': shell, 'sockets': sockets}
         def proc(pid, *_):
             return compositor if pid == 100 else shell
-        with patch.object(M, 'process', side_effect=proc), patch.object(Path, 'read_text', return_value='101'), patch.object(os, 'readlink', return_value='/usr/bin/roost-shell-gtk'), patch.object(M, 'peer', return_value={'pid': 100}), patch.object(M, 'libraries', return_value=[]), patch.dict(os.environ, {'XDG_RUNTIME_DIR': '/tmp/owned'}):
+        with patch.object(M, 'process', side_effect=proc), patch.object(Path, 'read_text', return_value='101'), patch.object(os, 'readlink', return_value='/usr/bin/tuna-shell-gtk'), patch.object(M, 'peer', return_value={'pid': 100}), patch.object(M, 'libraries', return_value=[]), patch.dict(os.environ, {'XDG_RUNTIME_DIR': '/tmp/owned'}):
             self.assertEqual(M.observe(100, 'owned', base, previous)['shell'], shell)
             with self.assertRaisesRegex(ValueError, 'shell-replacement-contract'):
                 M.observe(100, 'owned', base, previous, replacement=True)
@@ -188,19 +188,26 @@ class PackagePolicy(unittest.TestCase):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text('#!/bin/sh\nprintf "%s\\n" "' + name + ' 0.1.0"\n')
             p.chmod(0o755)
-        for name in ('usr/share/wayland-sessions/roost.desktop', 'usr/lib/systemd/user/roost-session.target', 'etc/pam.d/roost-lock'):
+        for name in ('usr/share/wayland-sessions/tuna.desktop', 'usr/lib/systemd/user/tuna-session.target', 'etc/pam.d/tuna-lock'):
             p = self.stage / name
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text('fixture\n')
         self.env = dict(os.environ, PATH=str(self.tools) + ':' + os.environ['PATH'], FIXTURE=str(self.stage))
         self.tool('dpkg-deb', '''case "$1" in
 -c) find "$FIXTURE" -type f | while read -r path; do echo "-rwxr-xr-x $path"; done ;;
--f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas' ;; esac ;;
+-f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas' ;; Replaces|Conflicts|Provides) echo roost ;; esac ;;  # tuna-rename: keep
 -x) cp -R "$FIXTURE/." "$3/" ;;
 --ctrl-tarfile) tar --owner=0 --group=0 -C "$FIXTURE" -cf - ./conffiles ;;
 --fsys-tarfile) tar --owner=0 --group=0 -C "$FIXTURE" -cf - ./usr ./etc ;;
 esac''')
-        (self.stage / 'conffiles').write_text('/etc/pam.d/roost-lock\n')
+        (self.stage / 'conffiles').write_text('/etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock\n')  # tuna-rename: keep
+        # One release of compatibility with the former name (#505).
+        # tuna-rename: keep-begin
+        for name in ('compositor', 'session', 'shell-gtk', 'shell-host', 'ibus-bridge', 'greeter'):
+            (self.stage / 'usr/bin' / ('roost-' + name)).symlink_to('tuna-' + name)
+        for name in ('usr/share/wayland-sessions/roost.desktop', 'etc/pam.d/roost-lock'):
+            (self.stage / name).write_text((ROOT / 'share/compat' / '/'.join(name.split('/')[-2:])).read_text())
+        # tuna-rename: keep-end
         self.tool('ldd', 'echo "libc.so.6 => /lib/libc.so.6 (0)"')
         self.tool('desktop-file-validate', 'exit 0')
 
@@ -215,21 +222,31 @@ esac''')
     def test_positive_controlled_tool_policy(self):
         self.assertEqual(self.check(), 0)
 
+    def test_compatibility_names_required(self):
+        # tuna-rename: keep-begin
+        (self.stage / 'usr/bin/roost-greeter').unlink()
+        self.assertNotEqual(self.check(), 0)
+        (self.stage / 'usr/bin/roost-greeter').symlink_to('tuna-greeter')
+        compat = self.stage / 'usr/share/wayland-sessions/roost.desktop'
+        compat.write_text(compat.read_text().replace('NoDisplay=true\n', ''))
+        self.assertNotEqual(self.check(), 0, 'the compat session entry must stay hidden')
+        # tuna-rename: keep-end
+
     def test_missing_preferred_gtk(self):
-        (self.stage / 'usr/bin/roost-shell-gtk').unlink()
+        (self.stage / 'usr/bin/tuna-shell-gtk').unlink()
         self.assertNotEqual(self.check(), 0)
 
     def test_each_binary_mode_required(self):
-        (self.stage / 'usr/bin/roost-shell-gtk').chmod(0o644)
+        (self.stage / 'usr/bin/tuna-shell-gtk').chmod(0o644)
         self.assertNotEqual(self.check(), 0)
 
     def test_version_exit_not_hidden_by_pipeline(self):
-        (self.stage / 'usr/bin/roost-shell-gtk').write_text('#!/bin/sh\necho "roost-shell-gtk 0.1.0"\nexit 9\n')
+        (self.stage / 'usr/bin/tuna-shell-gtk').write_text('#!/bin/sh\necho "tuna-shell-gtk 0.1.0"\nexit 9\n')
         self.assertNotEqual(self.check(), 0)
 
     def test_noisy_or_wrong_whole_line(self):
-        for value in ('roost-shell-gtk 0.1.0 [fixture]', 'wrong-name 0.1.0', 'roost-shell-gtk 0.1.0\nextra', 'roost-shell-gtk 0.1.0\n'):
-            (self.stage / 'usr/bin/roost-shell-gtk').write_text('#!/bin/sh\nprintf "%s\\n" "' + value + '"\n')
+        for value in ('tuna-shell-gtk 0.1.0 [fixture]', 'wrong-name 0.1.0', 'tuna-shell-gtk 0.1.0\nextra', 'tuna-shell-gtk 0.1.0\n'):
+            (self.stage / 'usr/bin/tuna-shell-gtk').write_text('#!/bin/sh\nprintf "%s\\n" "' + value + '"\n')
             self.assertNotEqual(self.check(), 0)
 
     def test_missing_loaded_elf_dependency(self):
@@ -255,7 +272,7 @@ esac''')
         self.assertNotEqual(self.check(), 0)
 
     def test_launcher_override_denies_before_any_process(self):
-        result = subprocess.run(['sh', str(ROOT / 'scripts/lib/roost-proof-session-launch'), '1', str(ROOT), 'owned'], env=dict(self.env, ROOST_SHELL_BIN='/tmp/wrong'), timeout=5)
+        result = subprocess.run(['sh', str(ROOT / 'scripts/lib/tuna-proof-session-launch'), '1', str(ROOT), 'owned'], env=dict(self.env, TUNA_SHELL_BIN='/tmp/wrong'), timeout=5)
         self.assertNotEqual(result.returncode, 0)
 
 
@@ -270,20 +287,24 @@ class ReleaseDelegatePolicy(unittest.TestCase):
                 path.write_text('#!/bin/sh\nset -eu\n' + body + '\n')
                 path.chmod(0o755)
             tool('git', 'echo v0.1.0')
-            tool('cargo', 'test "$*" = "build --locked --release -p roost-compositor -p roost-shell-gtk -p roost-shell-host -p roost-greeter"')
+            tool('cargo', 'test "$*" = "build --locked --release -p tuna-compositor -p tuna-shell-gtk -p tuna-shell-host -p tuna-greeter"')
             tool('dpkg-shlibdeps', 'exit 9' if failure == 'shlibs' else ('echo unknown' if failure == 'malformed' else 'echo "shlibs:Depends=libc6 (>= 2.36)"'))
             tool('dpkg-deb', 'test "$1" = --root-owner-group; test "$2" = --build; test "$(stat -c %a "$3")" = 755; cp "$3/DEBIAN/control" "$OUTPUT"')
             for name in M.BINS:
                 path = root / 'target/release' / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('#!/bin/sh\necho "' + name + ' 0.1.0"\nexit ' + str(version_exit if name == 'roost-shell-gtk' else 0) + '\n')
+                path.write_text('#!/bin/sh\necho "' + name + ' 0.1.0"\nexit ' + str(version_exit if name == 'tuna-shell-gtk' else 0) + '\n')
                 path.chmod(0o755)
-            for name in ('share/wayland-sessions/roost.desktop', 'share/systemd/user/roost-session.target', 'share/pam.d/roost-lock'):
+            for name in ('share/wayland-sessions/tuna.desktop', 'share/systemd/user/tuna-session.target', 'share/pam.d/tuna-lock'):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('fixture\n')
+            for name in ('share/compat/wayland-sessions/roost.desktop', 'share/compat/pam.d/roost-lock'):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('fixture\n')
             output = root / 'control'
-            result = subprocess.run(['sh', str(ROOT / 'scripts/roost-release'), '--allow-dirty', '--out', str(root/'out')], cwd=root, env=dict(os.environ, PATH=str(tools)+':'+os.environ['PATH'], OUTPUT=str(output)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            result = subprocess.run(['sh', str(ROOT / 'scripts/tuna-release'), '--allow-dirty', '--out', str(root/'out')], cwd=root, env=dict(os.environ, PATH=str(tools)+':'+os.environ['PATH'], OUTPUT=str(output)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             return result.returncode, output.read_text() if output.exists() else None
 
     def test_real_release_delegates_locked_all_six_and_abi_closure(self):
@@ -291,6 +312,8 @@ class ReleaseDelegatePolicy(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn('libc6 (>= 2.36)', control)
         self.assertIn('libgtk4-layer-shell0 (>= 1.1)', control)
+        for field in ('Replaces', 'Conflicts', 'Provides'):
+            self.assertIn(field + ': roost\n', control)  # tuna-rename: keep
         depends = next(line.removeprefix('Depends: ') for line in control.splitlines() if line.startswith('Depends: ')).split(', ')
         self.assertIn('libpam0g', depends)
         self.assertIn('gsettings-desktop-schemas', depends)
@@ -310,7 +333,7 @@ class ReleaseDelegatePolicy(unittest.TestCase):
 
 class StartupOverviewPolicy(unittest.TestCase):
     def actual_script(self, mode='1', failure='', after=None, startup=None):
-        script = (ROOT / 'scripts/roost-gtk-shell-proof').read_text()
+        script = (ROOT / 'scripts/tuna-gtk-shell-proof').read_text()
         start = script.index('if [ "$INSTALLED_PACKAGE" = 1 ]; then', script.index('[ -n "$WID" ] || fail G-PANEL'))
         end = script.index('# The panel is up once', start)
         fragment = script[start:end]

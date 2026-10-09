@@ -1,12 +1,12 @@
 //! Genuine distribution Orca, owned by the hardware compositor rather than a
 //! global user-manager service. No --replace, global PID selection or bus-stop
 //! request can affect another display's reader.
-use roost_shell_control::ScreenReaderState as State;
 use std::io::Read;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+use tuna_shell_control::ScreenReaderState as State;
 
 pub struct Reader {
     display: String,
@@ -72,7 +72,7 @@ impl Reader {
                         std::thread::sleep(Duration::from_millis(10))
                     }
                     _ => {
-                        eprintln!("roost-compositor: owned Orca reap deadline exceeded");
+                        eprintln!("tuna-compositor: owned Orca reap deadline exceeded");
                         break;
                     }
                 }
@@ -85,7 +85,7 @@ impl Reader {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     if diagnostics_visible {
-                        eprintln!("ROOST_ORCA_DIAGNOSTIC stage=child-exit pid={} attempt={} code={} signal={}", child.id(), self.attempts, status.code().unwrap_or(-1), status.signal().unwrap_or(0));
+                        eprintln!("TUNA_ORCA_DIAGNOSTIC stage=child-exit pid={} attempt={} code={} signal={}", child.id(), self.attempts, status.code().unwrap_or(-1), status.signal().unwrap_or(0));
                     }
                     self.child = None;
                     self.observed = None;
@@ -99,7 +99,12 @@ impl Reader {
                 }
                 Err(error) => {
                     if diagnostics_visible {
-                        eprintln!("ROOST_ORCA_DIAGNOSTIC stage=child-wait-error pid={} attempt={} kind={}", child.id(), self.attempts, error_kind(error.kind()));
+                        eprintln!(
+                            "TUNA_ORCA_DIAGNOSTIC stage=child-wait-error pid={} attempt={} kind={}",
+                            child.id(),
+                            self.attempts,
+                            error_kind(error.kind())
+                        );
                     }
                     self.stop();
                     self.state = State::Unavailable;
@@ -116,7 +121,7 @@ impl Reader {
                     } else {
                         if diagnostics_visible {
                             eprintln!(
-                                "ROOST_ORCA_DIAGNOSTIC stage={} pid={} attempt={} observed_running={}",
+                                "TUNA_ORCA_DIAGNOSTIC stage={} pid={} attempt={} observed_running={}",
                                 reason, pid, self.attempts, observed_running
                             );
                         }
@@ -165,7 +170,7 @@ impl Reader {
                 Err(error) => {
                     if diagnostics_visible {
                         eprintln!(
-                            "ROOST_ORCA_DIAGNOSTIC stage=child-spawn pid=0 attempt={} kind={}",
+                            "TUNA_ORCA_DIAGNOSTIC stage=child-spawn pid=0 attempt={} kind={}",
                             self.attempts,
                             error_kind(error.kind())
                         );
@@ -356,7 +361,7 @@ mod tests {
             assert_eq!(bus_call_command(command).unwrap_err(), expected);
         }
         assert_eq!(
-            bus_call_command(Command::new("/nonexistent/roost-orca-test")).unwrap_err(),
+            bus_call_command(Command::new("/nonexistent/tuna-orca-test")).unwrap_err(),
             "bus-spawn"
         );
     }

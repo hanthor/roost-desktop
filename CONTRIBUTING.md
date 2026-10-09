@@ -1,6 +1,6 @@
-# Contributing to Roost
+# Contributing to Tuna Desktop
 
-Roost is in design-and-planning stage: no compositor implementation has
+Tuna Desktop is in design-and-planning stage: no compositor implementation has
 started yet (see [README.md](README.md)). Most contributions right now are
 planning artifacts (specs, plans, ADRs) and documentation. This guide covers
 both that work and the code contribution process for when implementation
@@ -81,7 +81,7 @@ Once a plan is approved and implementation starts:
   - `cargo fmt --all -- --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
-  - a nested-session journey test (`scripts/roost-journey`) that launches the
+  - a nested-session journey test (`scripts/tuna-journey`) that launches the
     nested compositor under Xvfb and asserts visible reaction; artifacts are
     uploaded for human review.
   - an app-content journey (headed Chromium via Playwright as a Wayland
@@ -107,7 +107,7 @@ Once a plan is approved and implementation starts:
   Spektacular CLI (see AGENTS.md).
 - **Respect the workspace boundaries.** [ADR 0004](docs/adr/0004-no-split-preserve-seams.md)
   keeps this a monorepo but defines extraction seams between
-  `roost-shell-control` (framing/messages), `supervise.rs` (std-only), and
+  `tuna-shell-control` (framing/messages), `supervise.rs` (std-only), and
   shell-host (wire-only, no private compositor APIs). Preserve these
   boundaries even though the crates currently live together.
 

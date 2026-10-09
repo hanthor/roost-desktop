@@ -1,0 +1,5 @@
+#%PAM-1.0
+# Tuna Desktop lock screen: unlocks the running session with its own user's
+# password (used whenever no greetd daemon is reachable, e.g. under GDM).
+auth      include   login
+account   include   login

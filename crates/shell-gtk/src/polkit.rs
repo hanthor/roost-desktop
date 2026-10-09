@@ -7,7 +7,7 @@
 //! on the system bus for this session, answers BeginAuthentication with
 //! the dialog, and checks the password through polkit's own helper
 //! (polkit-agent-helper-1, setuid root, which speaks PAM and reports the
-//! result to polkit itself). Harnesses point `ROOST_POLKIT_HELPER` at a
+//! result to polkit itself). Harnesses point `TUNA_POLKIT_HELPER` at a
 //! stand-in.
 
 use std::cell::{Cell, RefCell};
@@ -19,7 +19,7 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-const AGENT_PATH: &str = "/org/roost/PolkitAgent";
+const AGENT_PATH: &str = "/org/tuna/PolkitAgent";
 const AUTHORITY: &str = "org.freedesktop.PolicyKit1";
 const AUTHORITY_PATH: &str = "/org/freedesktop/PolicyKit1/Authority";
 const AUTHORITY_IFACE: &str = "org.freedesktop.PolicyKit1.Authority";
@@ -126,7 +126,7 @@ fn user_names(uid: u32) -> Option<(String, String)> {
 
 /// polkit's password helper.
 fn helper_path() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("ROOST_POLKIT_HELPER") {
+    if let Some(p) = std::env::var_os("TUNA_POLKIT_HELPER") {
         return Some(p.into());
     }
     [
@@ -164,12 +164,12 @@ impl PolkitAgent {
     fn new(app: &gtk::Application) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-end-session");
-        window.add_css_class("roost-polkit");
+        window.add_css_class("tuna-end-session");
+        window.add_css_class("tuna-polkit");
         window.set_title(Some("Authentication Required"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::POLKIT_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::POLKIT_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
@@ -365,7 +365,7 @@ impl PolkitAgent {
         ) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("roost-shell-gtk: polkit helper: {e}");
+                eprintln!("tuna-shell-gtk: polkit helper: {e}");
                 return;
             }
         };
@@ -525,13 +525,13 @@ pub fn start(app: &gtk::Application) {
     let node = match gio::DBusNodeInfo::for_xml(XML) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("roost-shell-gtk: polkit agent interface: {e}");
+            eprintln!("tuna-shell-gtk: polkit agent interface: {e}");
             return;
         }
     };
     gio::bus_get(gio::BusType::System, gio::Cancellable::NONE, move |conn| {
         let Ok(conn) = conn else {
-            eprintln!("roost-shell-gtk: polkit agent: no system bus");
+            eprintln!("tuna-shell-gtk: polkit agent: no system bus");
             return;
         };
         let Some(info) = node.lookup_interface("org.freedesktop.PolicyKit1.AuthenticationAgent")
@@ -558,7 +558,7 @@ pub fn start(app: &gtk::Application) {
                 })
                 .build();
         if let Err(e) = registered {
-            eprintln!("roost-shell-gtk: polkit agent object: {e}");
+            eprintln!("tuna-shell-gtk: polkit agent object: {e}");
             return;
         }
         // Register now, and again whenever polkit (re)starts, as GNOME's
@@ -592,8 +592,8 @@ fn register(conn: &gio::DBusConnection) {
         10_000,
         gio::Cancellable::NONE,
         |res| match res {
-            Ok(_) => eprintln!("roost-shell-gtk: polkit agent registered"),
-            Err(e) => eprintln!("roost-shell-gtk: polkit agent not registered: {e}"),
+            Ok(_) => eprintln!("tuna-shell-gtk: polkit agent registered"),
+            Err(e) => eprintln!("tuna-shell-gtk: polkit agent not registered: {e}"),
         },
     );
 }

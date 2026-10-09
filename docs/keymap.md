@@ -1,4 +1,4 @@
-# Roost keymap
+# Tuna Desktop keymap
 
 The single reference for every keyboard chord in the session:
 shell chords drive the panel, dock, popups, and overview; the

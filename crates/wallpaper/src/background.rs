@@ -1,6 +1,6 @@
 //! GNOME static placement and color composition, independent of GPU rendering.
 use image::RgbaImage;
-use roost_shell_control::background::{PictureSettings, Placement, Shading};
+use tuna_shell_control::background::{PictureSettings, Placement, Shading};
 
 /// Actual physical output dimensions and logical layout, including gaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -3491,116 +3491,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roost-compositor"
-version = "0.1.0"
-dependencies = [
- "calloop 0.14.5",
- "greetd_ipc",
- "image",
- "libc",
- "libloading 0.9.0",
- "pipewire",
- "png",
- "rand 0.10.3",
- "reis",
- "roost-greeter-control",
- "roost-shell-control",
- "roost-wallpaper",
- "roxmltree",
- "rustix 1.1.5",
- "serde",
- "serde_json",
- "signal-hook",
- "smithay",
- "tempfile",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-misc",
- "wayland-protocols-wlr",
- "wayland-scanner",
- "wayland-server",
- "zbus",
-]
-
-[[package]]
-name = "roost-greeter"
-version = "0.1.0"
-dependencies = [
- "greetd_ipc",
- "gtk4",
- "libadwaita",
- "roost-greeter-control",
- "tempfile",
-]
-
-[[package]]
-name = "roost-greeter-control"
-version = "0.1.0"
-dependencies = [
- "greetd_ipc",
-]
-
-[[package]]
-name = "roost-shell-control"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "roost-shell-gtk"
-version = "0.1.0"
-dependencies = [
- "gio",
- "glib",
- "glib-build-tools",
- "gtk4",
- "gtk4-layer-shell",
- "gtk4-session-lock",
- "jiff",
- "libadwaita",
- "libc",
- "roost-shell-control",
- "roost-shell-host",
- "serde_json",
- "tempfile",
- "xkbcommon 0.9.0",
-]
-
-[[package]]
-name = "roost-shell-host"
-version = "0.1.0"
-dependencies = [
- "freedesktop-desktop-entry",
- "gio",
- "image",
- "jiff",
- "resvg",
- "rhai",
- "roost-compositor",
- "roost-shell-control",
- "rustix 1.1.5",
- "serde_json",
- "tempfile",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-misc",
- "wayland-protocols-wlr",
- "xkbcommon 0.9.0",
- "zbus",
-]
-
-[[package]]
-name = "roost-wallpaper"
-version = "0.1.0"
-dependencies = [
- "image",
- "jxl-oxide",
- "roost-shell-control",
-]
-
-[[package]]
 name = "roxmltree"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4250,6 +4140,108 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tuna-compositor"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.5",
+ "greetd_ipc",
+ "image",
+ "libc",
+ "libloading 0.9.0",
+ "pipewire",
+ "png",
+ "rand 0.10.3",
+ "reis",
+ "roxmltree",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "smithay",
+ "tempfile",
+ "tuna-greeter",
+ "tuna-shell-control",
+ "tuna-wallpaper",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
+ "wayland-scanner",
+ "wayland-server",
+ "zbus",
+]
+
+[[package]]
+name = "tuna-greeter"
+version = "0.1.0"
+dependencies = [
+ "greetd_ipc",
+ "gtk4",
+ "libadwaita",
+ "tempfile",
+]
+
+[[package]]
+name = "tuna-shell-control"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
+
+[[package]]
+name = "tuna-shell-gtk"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "glib-build-tools",
+ "gtk4",
+ "gtk4-layer-shell",
+ "gtk4-session-lock",
+ "jiff",
+ "libadwaita",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tuna-shell-control",
+ "tuna-shell-host",
+ "xkbcommon 0.9.0",
+]
+
+[[package]]
+name = "tuna-shell-host"
+version = "0.1.0"
+dependencies = [
+ "freedesktop-desktop-entry",
+ "gio",
+ "image",
+ "jiff",
+ "resvg",
+ "rhai",
+ "rustix 1.1.5",
+ "serde_json",
+ "tempfile",
+ "tuna-compositor",
+ "tuna-shell-control",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
+ "xkbcommon 0.9.0",
+ "zbus",
+]
+
+[[package]]
+name = "tuna-wallpaper"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "jxl-oxide",
+ "tuna-shell-control",
 ]
 
 [[package]]

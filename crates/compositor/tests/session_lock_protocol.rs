@@ -1,8 +1,8 @@
 //! Real ext-session-lock clients; runtime PID/PAM policy is tested separately.
-use roost_compositor::TestCompositor;
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
+use tuna_compositor::TestCompositor;
 use wayland_client::protocol::{
     wl_compositor::WlCompositor,
     wl_output::WlOutput,
@@ -131,7 +131,7 @@ fn compositor() -> TestCompositor {
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "Roost".into(),
+            make: "Tuna Desktop".into(),
             model: "Test".into(),
         },
     );
@@ -144,7 +144,7 @@ fn compositor() -> TestCompositor {
         Some(Scale::Fractional(1.5)),
         Some((0, 0).into()),
     );
-    output.create_global::<roost_compositor::State>(&comp.display.handle());
+    output.create_global::<tuna_compositor::State>(&comp.display.handle());
     comp.state.add_output("fixture", Some(output), 1500, 900);
     comp
 }

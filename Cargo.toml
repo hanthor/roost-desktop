@@ -46,7 +46,7 @@ rhai = "1.26"
 
 # Wallpaper decoding runs in debug builds too (proofs, nested sessions):
 # unoptimised, GNOME's 4K JPEG XL defaults take tens of seconds. The
-# generic image code is instantiated inside roost-wallpaper, so that
+# generic image code is instantiated inside tuna-wallpaper, so that
 # crate is optimised as well.
 [profile.dev.package.jxl-oxide]
 opt-level = 3
@@ -74,7 +74,7 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.image]
 opt-level = 3
-[profile.dev.package.roost-wallpaper]
+[profile.dev.package.tuna-wallpaper]
 opt-level = 3
 
 # Upstream reis0.7.1 plus bounded pre-decoder socket accumulation.

@@ -3,8 +3,8 @@
 //! Under GDM (TunaOS Marlin's login manager) no greetd socket exists,
 //! so the greetd unlock path alone would leave a locked session locked
 //! for good. This is the other path, the one swaylock uses: a PAM
-//! transaction for the session's own user against the `roost-lock`
-//! service (`/etc/pam.d/roost-lock`, shipped with the package, which
+//! transaction for the session's own user against the `tuna-lock`
+//! service (`/etc/pam.d/tuna-lock`, shipped with the package, which
 //! includes `login`). Checking one's own password needs no privilege:
 //! pam_unix hands it to its setuid helper.
 //!
@@ -22,9 +22,9 @@ use std::time::Duration;
 use greetd_ipc::{codec::Error as CodecError, AuthMessageType, ErrorType, Response};
 
 /// PAM service the lock screen authenticates against.
-pub const DEFAULT_SERVICE: &str = "roost-lock";
+pub const DEFAULT_SERVICE: &str = "tuna-lock";
 /// Environment override for the service name (tests, distributions).
-pub const SERVICE_ENV: &str = "ROOST_PAM_SERVICE";
+pub const SERVICE_ENV: &str = "TUNA_PAM_SERVICE";
 /// Longest the compositor waits for one PAM transaction.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -191,7 +191,7 @@ pub fn authenticate_with_deadline(service: &str, user: &str, password: &str) -> 
     let (tx, rx) = mpsc::channel();
     let (service, user, password) = (service.to_owned(), user.to_owned(), password.to_owned());
     let spawned = std::thread::Builder::new()
-        .name("roost-pam".into())
+        .name("tuna-pam".into())
         .spawn(move || {
             let _ = tx.send(authenticate(&service, &user, &password));
         });

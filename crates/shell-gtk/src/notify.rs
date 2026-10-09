@@ -2,7 +2,7 @@
 //! the calendar popover, Clear, and Do Not Disturb.
 //!
 //! The shell owns `org.freedesktop.Notifications` through the existing
-//! toolkit-free daemon (`roost_shell_host::intake::NotificationBus`) and
+//! toolkit-free daemon (`tuna_shell_host::intake::NotificationBus`) and
 //! store (`NotificationCenter`); this module only draws them. Banners
 //! stack top-center under the top bar and expire after
 //! [`BANNER_TIMEOUT`] unless critical; the list shows history newest
@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use roost_shell_host::intake::NotificationBus;
-use roost_shell_host::notifications::{Notification, NotificationCenter, Urgency};
+use tuna_shell_host::intake::NotificationBus;
+use tuna_shell_host::notifications::{Notification, NotificationCenter, Urgency};
 
 /// How long a normal or low banner stays up (GNOME: about 4 s).
 pub const BANNER_TIMEOUT: Duration = Duration::from_secs(4);
@@ -250,12 +250,12 @@ fn source_of(n: &Notification) -> (String, Option<gio::Icon>) {
 }
 
 /// The installed app a `desktop-entry` hint names, if any.
-fn desktop_app(id: &str) -> Option<roost_shell_host::apps::AppEntry> {
-    roost_shell_host::apps::default_app_dirs()
+fn desktop_app(id: &str) -> Option<tuna_shell_host::apps::AppEntry> {
+    tuna_shell_host::apps::default_app_dirs()
         .into_iter()
         .map(|dir| dir.join(format!("{id}.desktop")))
         .find(|path| path.is_file())
-        .and_then(|path| roost_shell_host::apps::entry_from_file(&path))
+        .and_then(|path| tuna_shell_host::apps::entry_from_file(&path))
 }
 
 /// A `Notify` app_icon as GNOME reads it: a file URI, an absolute path,
@@ -279,10 +279,10 @@ impl NotifyUi {
         let bus = NotificationBus::new(center.clone());
 
         let banner_window = gtk::ApplicationWindow::new(app);
-        banner_window.add_css_class("roost-banners");
+        banner_window.add_css_class("tuna-banners");
         banner_window.init_layer_shell();
         banner_window.set_layer(Layer::Overlay);
-        banner_window.set_namespace(Some(roost_shell_control::GTK_BANNERS_NAMESPACE));
+        banner_window.set_namespace(Some(tuna_shell_control::GTK_BANNERS_NAMESPACE));
         banner_window.set_anchor(Edge::Top, true);
         // The card's own 4px margin puts it 4px under the bar (GNOME).
         banner_window.set_margin(Edge::Top, 0);

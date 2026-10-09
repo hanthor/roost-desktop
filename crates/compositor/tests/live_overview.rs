@@ -15,11 +15,11 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
 
-use roost_compositor::control::ControlHub;
-use roost_compositor::state::TokenStore;
-use roost_compositor::windows::WindowManager;
-use roost_compositor::{TestCompositor, SEAT_NAME};
-use roost_shell_control::{
+use tuna_compositor::control::ControlHub;
+use tuna_compositor::state::TokenStore;
+use tuna_compositor::windows::WindowManager;
+use tuna_compositor::{TestCompositor, SEAT_NAME};
+use tuna_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, Message,
     CURRENT_VERSION,
 };

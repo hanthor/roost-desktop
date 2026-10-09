@@ -1,6 +1,6 @@
 //! ext-session-lock-v1: the shell's lock screen (GNOME 51's curtain and
 //! unlock prompt) as lock surfaces. Adapted from niri's handler
-//! (GPL-3.0-or-later, like Roost).
+//! (GPL-3.0-or-later, like Tuna Desktop).
 //!
 //! Authority stays with the compositor (ADR: the lock flag is
 //! compositor-owned). A lock request is granted only to the supervised

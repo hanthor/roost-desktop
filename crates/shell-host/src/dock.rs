@@ -746,7 +746,7 @@ mod tests {
 
     fn stack_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "roost-stack-test-{}-{}",
+            "tuna-stack-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

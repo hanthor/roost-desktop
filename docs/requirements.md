@@ -20,10 +20,10 @@ Two requirement namespaces exist, and they must never be confused:
   parent requirement `R5`. A bare `R<n>` inside a spec document means that
   spec's own requirement.
 
-Test IDs follow the same rule. In `Roost-<spek>-<requirement>-<case>`
+Test IDs follow the same rule. In `Tuna-<spek>-<requirement>-<case>`
 ([test strategy §4](test-strategy.md#4-test-design-and-traceability)), the
 `<requirement>` field is the spec requirement of the named spek:
-`Roost-001-R5-01` is case 01 of `001-R5`. The link from a spec requirement
+`Tuna-001-R5-01` is case 01 of `001-R5`. The link from a spec requirement
 up to a parent requirement is recorded in the spec and in this register,
 not in the test ID.
 

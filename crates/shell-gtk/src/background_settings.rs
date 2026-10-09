@@ -9,8 +9,8 @@ pub(super) fn picture_settings(
     shading: &str,
     primary: &str,
     secondary: &str,
-) -> Option<roost_shell_control::background::PictureSettings> {
-    use roost_shell_control::background::{PictureSettings, Placement, Shading};
+) -> Option<tuna_shell_control::background::PictureSettings> {
+    use tuna_shell_control::background::{PictureSettings, Placement, Shading};
     let color = |text: &str| {
         gtk4::gdk::RGBA::parse(text)
             .map(|rgb| {
@@ -32,13 +32,13 @@ pub(super) fn picture_settings(
 pub(super) fn append_metadata(
     mut text: String,
     lock_uri: &str,
-    desktop: roost_shell_control::background::PictureSettings,
-    lock: roost_shell_control::background::PictureSettings,
+    desktop: tuna_shell_control::background::PictureSettings,
+    lock: tuna_shell_control::background::PictureSettings,
 ) -> Result<String, serde_json::Error> {
     text.push_str(lock_uri);
     text.push('\n');
     text.push_str(&serde_json::to_string(
-        &roost_shell_control::background::BackgroundMetadata {
+        &tuna_shell_control::background::BackgroundMetadata {
             version: 1,
             desktop,
             lock,
@@ -52,7 +52,7 @@ pub(super) fn append_metadata(
 mod background_metadata_tests {
     use super::{append_metadata, picture_settings};
     use crate::logic::wallpaper_drop;
-    use roost_shell_control::background::BackgroundMetadata;
+    use tuna_shell_control::background::BackgroundMetadata;
 
     #[test]
     fn invalid_primary_or_secondary_never_suppresses_desktop_dark_or_lock_uri() {
