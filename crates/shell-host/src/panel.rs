@@ -161,7 +161,21 @@ impl fmt::Display for PanelError {
     }
 }
 
-impl std::error::Error for PanelError {}
+impl std::error::Error for PanelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Connect(err) => Some(err),
+            Self::Registry(err) => Some(err),
+            Self::NoCompositor(err) => Some(err),
+            Self::NoLayerShell(err) => Some(err),
+            Self::NoShm(err) => Some(err),
+            Self::NoSeat(err) => Some(err),
+            Self::Dispatch(err) => Some(err),
+            Self::Control(err) => Some(err),
+            Self::Flush(_) => None,
+        }
+    }
+}
 
 /// Application state driven by the Wayland event queue.
 pub struct ShellHost {
