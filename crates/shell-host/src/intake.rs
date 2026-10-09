@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use zbus::object_server::SignalEmitter;
 
-use crate::notifications::{NotificationAction, NotificationCenter, NotificationError, Urgency};
+use crate::notifications::{
+    Incoming, NotificationAction, NotificationCenter, NotificationError, Sound, Urgency,
+};
 
 /// Well-known notifications name (freedesktop Desktop Notifications).
 pub const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
@@ -54,6 +56,30 @@ fn urgency_hint(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> Urgency 
     }
 }
 
+/// A string hint, empty when absent or mistyped.
+fn string_hint(hints: &HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> String {
+    hints
+        .get(key)
+        .and_then(|v| String::try_from(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The sound a notification asks for: `sound-name` or `sound-file`,
+/// nothing when `suppress-sound` is set.
+fn sound_hints(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> Sound {
+    let suppressed = hints
+        .get("suppress-sound")
+        .and_then(|v| bool::try_from(v).ok())
+        .unwrap_or(false);
+    if suppressed {
+        return Sound::default();
+    }
+    Sound {
+        name: string_hint(hints, "sound-name"),
+        file: string_hint(hints, "sound-file"),
+    }
+}
+
 /// The `org.freedesktop.Notifications` object: wire calls become
 /// center mutations. Banner-side presses never arrive here as method
 /// calls — they go through [`NotificationBus`], which mutates and
@@ -80,25 +106,22 @@ impl Notifications {
         hints: HashMap<String, zbus::zvariant::OwnedValue>,
         _expire_timeout: i32,
     ) -> u32 {
-        let replaces = (replaces_id != 0).then_some(replaces_id as u64);
-        let desktop_entry = hints
-            .get("desktop-entry")
-            .and_then(|v| String::try_from(v.clone()).ok())
-            .unwrap_or_default();
+        // The source's notification policy (GNOME Settings) decides
+        // whether it is filed at all, its banner and its sound.
+        let incoming = Incoming {
+            app: app_name,
+            icon: app_icon,
+            title: summary,
+            body,
+            actions: pair_actions(&actions),
+            urgency: urgency_hint(&hints),
+            replaces_id: (replaces_id != 0).then_some(replaces_id as u64),
+            desktop_entry: string_hint(&hints, "desktop-entry"),
+            sound: sound_hints(&hints),
+        };
         self.center
             .lock()
-            .map(|mut center| {
-                let id = center.notify(
-                    &app_name,
-                    &summary,
-                    &body,
-                    pair_actions(&actions),
-                    urgency_hint(&hints),
-                    replaces,
-                );
-                center.set_source(id, &app_icon, &desktop_entry);
-                id
-            })
+            .map(|mut center| center.deliver(incoming))
             .unwrap_or(0) as u32
     }
 
