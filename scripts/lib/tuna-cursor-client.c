@@ -74,8 +74,15 @@ static void leave(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *
 static void motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y) { (void)d; (void)p; (void)t; (void)x; (void)y; }
 static void button(void *d, struct wl_pointer *p, uint32_t s, uint32_t t, uint32_t b, uint32_t st) { (void)d; (void)p; (void)s; (void)t; (void)b; (void)st; }
 static void axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v) { (void)d; (void)p; (void)t; (void)a; (void)v; }
+static void frame(void *d, struct wl_pointer *p) { (void)d; (void)p; }
+static void axis_source(void *d, struct wl_pointer *p, uint32_t s) { (void)d; (void)p; (void)s; }
+static void axis_stop(void *d, struct wl_pointer *p, uint32_t t, uint32_t a) { (void)d; (void)p; (void)t; (void)a; }
+static void axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int32_t v) { (void)d; (void)p; (void)a; (void)v; }
+/* Every event of wl_pointer v5, the version bound below. */
 static const struct wl_pointer_listener pointer_listener = {
     .enter = enter, .leave = leave, .motion = motion, .button = button, .axis = axis,
+    .frame = frame, .axis_source = axis_source, .axis_stop = axis_stop,
+    .axis_discrete = axis_discrete,
 };
 
 static void ping(void *data, struct xdg_wm_base *wm, uint32_t serial) { (void)data; xdg_wm_base_pong(wm, serial); }
