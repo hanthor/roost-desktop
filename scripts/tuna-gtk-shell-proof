@@ -1374,7 +1374,7 @@ motion_policy() {
     case "$1" in
     Full) want=full ;;
     Off) want=off ;;
-    FadesOnly) want=fade-only ;;
+    FadesOnly) want='fade-only' ;;
     esac
     cstate ".motion_policy == \"$want\"" "motion policy $want" || fail G-FOLDER-ZOOM "motion policy $want never arrived"
 }
