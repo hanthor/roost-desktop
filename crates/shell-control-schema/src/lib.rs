@@ -32,9 +32,10 @@ pub mod layer_namespaces;
 pub use layer_namespaces::{
     BANNER_NAMESPACE, DOCK_NAMESPACE, END_SESSION_NAMESPACE, FOLDER_DIALOG_NAMESPACE,
     GTK_BANNERS_NAMESPACE, GTK_PANEL_NAMESPACE, IBUS_CANDIDATES_NAMESPACE, KBD_A11Y_NAMESPACE,
-    NETWORK_AGENT_NAMESPACE, OSD_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_NAMESPACE, POLKIT_NAMESPACE,
-    PREVIEW_CHROME_NAMESPACE, SCREENSHOT_NAMESPACE, SHORTCUT_CONSENT_NAMESPACE, SWITCHER_NAMESPACE,
-    SWITCHER_THUMBNAILS_NAMESPACE, WINDOW_MENU_NAMESPACE, WORKSPACE_POPUP_NAMESPACE,
+    NETWORK_AGENT_NAMESPACE, OSD_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_NAMESPACE,
+    POINTER_A11Y_NAMESPACE, POLKIT_NAMESPACE, PREVIEW_CHROME_NAMESPACE, SCREENSHOT_NAMESPACE,
+    SHORTCUT_CONSENT_NAMESPACE, SWITCHER_NAMESPACE, SWITCHER_THUMBNAILS_NAMESPACE,
+    WINDOW_MENU_NAMESPACE, WORKSPACE_POPUP_NAMESPACE,
 };
 
 /// Panel height in pixels (compositor ↔ shell contract).
@@ -163,9 +164,15 @@ impl ProtocolVersion {
     /// and the compositor-to-shell `KeyboardAidToggled` message (Sticky
     /// and Slow Keys switched from the keyboard). Positional: both peers
     /// ship together.
+    ///
+    /// `0.30` appends GNOME's pointer accessibility aids to
+    /// `InputSettings`, the shell-to-compositor `SetDwellClickType`
+    /// command and the compositor-to-shell `DwellClickType` and
+    /// `PointerTimeout` messages (hover click's chooser and GNOME's pie
+    /// timer). Positional: both peers ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 29,
+        minor: 30,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -381,6 +388,8 @@ pub enum CommandKind {
     /// Preference from the authenticated supervised shell. Nested runtimes
     /// ignore it; the hardware compositor owns the actual Orca child.
     SetScreenReader { enabled: bool },
+    /// The hover-click chooser picked the click the next dwell makes.
+    SetDwellClickType { click: DwellClick },
 }
 
 /// Screen Reader process lifecycle, not proof of spoken usability.
@@ -728,6 +737,50 @@ pub enum Message {
     /// two modifiers at once) switched an aid; the shell saves the
     /// setting and confirms it as GNOME does.
     KeyboardAidToggled { aid: KeyboardAid, enabled: bool },
+    /// The click the next dwell makes, whenever it changes (a one-shot
+    /// type returns to a single click once used).
+    DwellClickType { click: DwellClick },
+    /// A pointer accessibility timeout started (`duration_ms` set) at
+    /// the pointer, or stopped (`clicked` when it ran out and acted).
+    /// The shell draws GNOME's pie timer around the pointer.
+    PointerTimeout {
+        kind: PointerTimeoutKind,
+        duration_ms: Option<u32>,
+        clicked: bool,
+        x: i32,
+        y: i32,
+    },
+}
+
+/// The click a hover (dwell) makes: GNOME's dwell click types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DwellClick {
+    #[default]
+    Primary,
+    Double,
+    /// First dwell presses, the next releases.
+    Drag,
+    Secondary,
+}
+
+/// Which pointer accessibility timeout runs (Clutter's timeout types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PointerTimeoutKind {
+    /// Simulated secondary click: a held primary button.
+    SecondaryClick,
+    /// Hover click waiting to click.
+    Dwell,
+    /// Hover click waiting for a direction gesture.
+    Gesture,
+}
+
+/// A hover-click gesture direction (`GDesktopMouseDwellDirection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DwellDirection {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// The keyboard aids GNOME lets the keyboard itself switch.
@@ -796,6 +849,49 @@ pub struct InputSettings {
     /// GNOME's keyboard accessibility aids.
     #[serde(default)]
     pub keyboard_aids: KeyboardAids,
+    /// GNOME's pointer accessibility aids.
+    #[serde(default)]
+    pub pointer_aids: PointerAids,
+}
+
+/// GNOME's `org.gnome.desktop.a11y.mouse`, flattened for the compositor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointerAids {
+    /// `secondary-click-enabled` and `secondary-click-time` (ms).
+    pub secondary_click: bool,
+    pub secondary_click_ms: u32,
+    /// `dwell-click-enabled`, `dwell-time` (ms) and `dwell-threshold`
+    /// (pixels).
+    pub dwell_click: bool,
+    pub dwell_ms: u32,
+    pub dwell_threshold: u32,
+    /// `dwell-mode`: a direction gesture picks the click, instead of the
+    /// panel chooser (`window`).
+    pub dwell_gesture: bool,
+    /// `dwell-gesture-single`, `-double`, `-drag` and `-secondary`
+    /// (`None` for GNOME's `none`).
+    pub gesture_single: Option<DwellDirection>,
+    pub gesture_double: Option<DwellDirection>,
+    pub gesture_drag: Option<DwellDirection>,
+    pub gesture_secondary: Option<DwellDirection>,
+}
+
+impl Default for PointerAids {
+    /// GNOME 51's defaults.
+    fn default() -> Self {
+        Self {
+            secondary_click: false,
+            secondary_click_ms: 1200,
+            dwell_click: false,
+            dwell_ms: 1200,
+            dwell_threshold: 10,
+            dwell_gesture: false,
+            gesture_single: Some(DwellDirection::Left),
+            gesture_double: Some(DwellDirection::Up),
+            gesture_drag: Some(DwellDirection::Down),
+            gesture_secondary: Some(DwellDirection::Right),
+        }
+    }
 }
 
 /// GNOME's `org.gnome.desktop.a11y.keyboard`, flattened for the
@@ -878,6 +974,7 @@ impl Default for InputSettings {
             touchpad_left_handed: false,
             right_to_left: false,
             keyboard_aids: KeyboardAids::default(),
+            pointer_aids: PointerAids::default(),
         }
     }
 }
@@ -1251,6 +1348,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::PointerOutput { .. }
         | Message::ScreenReader { .. }
         | Message::KeyboardAidToggled { .. }
+        | Message::DwellClickType { .. }
+        | Message::PointerTimeout { .. }
         | Message::ShortcutConsent { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
@@ -1315,8 +1414,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_29() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 29));
+    fn current_version_is_0_30() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 30));
     }
 
     #[test]
@@ -1376,6 +1475,62 @@ mod tests {
             for enabled in [false, true] {
                 roundtrip(&Message::KeyboardAidToggled { aid, enabled });
             }
+        }
+    }
+
+    #[test]
+    fn pointer_aids_survive_the_positional_control_wire() {
+        roundtrip(&Message::Command {
+            id: 1,
+            kind: CommandKind::SetInputSettings(InputSettings {
+                pointer_aids: PointerAids {
+                    secondary_click: true,
+                    secondary_click_ms: 700,
+                    dwell_click: true,
+                    dwell_ms: 900,
+                    dwell_threshold: 4,
+                    dwell_gesture: true,
+                    gesture_drag: None,
+                    ..PointerAids::default()
+                },
+                keyboard_aids: KeyboardAids {
+                    sticky: true,
+                    ..KeyboardAids::default()
+                },
+                ..InputSettings::default()
+            }),
+        });
+        for click in [
+            DwellClick::Primary,
+            DwellClick::Double,
+            DwellClick::Drag,
+            DwellClick::Secondary,
+        ] {
+            roundtrip(&Message::Command {
+                id: 2,
+                kind: CommandKind::SetDwellClickType { click },
+            });
+            roundtrip(&Message::DwellClickType { click });
+        }
+        for kind in [
+            PointerTimeoutKind::SecondaryClick,
+            PointerTimeoutKind::Dwell,
+            PointerTimeoutKind::Gesture,
+        ] {
+            roundtrip(&Message::PointerTimeout {
+                kind,
+                duration_ms: Some(1200),
+                clicked: false,
+                x: 10,
+                y: -3,
+            });
+            roundtrip(&Message::PointerTimeout {
+                kind,
+                duration_ms: None,
+                clicked: true,
+                x: 0,
+                y: 0,
+            });
         }
     }
 
@@ -1445,7 +1600,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 29).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 30).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 30).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 31).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

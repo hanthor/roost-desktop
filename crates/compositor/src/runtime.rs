@@ -2798,7 +2798,7 @@ impl Runtime {
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
         self.triggers.set_right_to_left(settings.right_to_left);
-        self.configure_input_aids(&settings.keyboard_aids);
+        self.configure_input_aids(&settings.keyboard_aids, &settings.pointer_aids);
         // Introspect's AnimationsEnabled is GNOME's enable-animations
         // (St): reduced motion keeps it true, as in GNOME 51.
         self.introspect
@@ -3045,6 +3045,9 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some(click) = outcome.dwell_click {
+            self.set_dwell_click_type(click);
         }
         if let Some(enabled) = outcome.screen_reader {
             #[cfg(feature = "drm")]

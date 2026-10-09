@@ -85,6 +85,16 @@ pub enum Handled {
         aid: tuna_shell_control::KeyboardAid,
         enabled: bool,
     },
+    /// The click the next hover click makes.
+    DwellClickType(tuna_shell_control::DwellClick),
+    /// A pointer accessibility timeout started or stopped (pie timer).
+    PointerTimeout {
+        kind: tuna_shell_control::PointerTimeoutKind,
+        duration_ms: Option<u32>,
+        clicked: bool,
+        x: i32,
+        y: i32,
+    },
     /// A grabbed accelerator was pressed (org.gnome.Shell).
     Accelerator {
         /// The grab's action id.
@@ -371,6 +381,19 @@ impl ControlClient {
         self.write_message(&Message::Command {
             id,
             kind: CommandKind::ToggleOverview,
+        })?;
+        Ok(id)
+    }
+
+    /// The hover-click chooser's pick for the next dwell.
+    pub fn set_dwell_click_type(
+        &mut self,
+        click: tuna_shell_control::DwellClick,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetDwellClickType { click },
         })?;
         Ok(id)
     }
@@ -713,6 +736,20 @@ impl ControlClient {
             Message::KeyboardAidToggled { aid, enabled } => {
                 Ok(Handled::KeyboardAidToggled { aid, enabled })
             }
+            Message::DwellClickType { click } => Ok(Handled::DwellClickType(click)),
+            Message::PointerTimeout {
+                kind,
+                duration_ms,
+                clicked,
+                x,
+                y,
+            } => Ok(Handled::PointerTimeout {
+                kind,
+                duration_ms,
+                clicked,
+                x,
+                y,
+            }),
             Message::ScreenReader { state } => Ok(Handled::ScreenReader(state)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
@@ -881,6 +918,8 @@ fn message_label(msg: &Message) -> &'static str {
         Message::PointerOutput { .. } => "PointerOutput",
         Message::ShortcutConsent { .. } => "ShortcutConsent",
         Message::KeyboardAidToggled { .. } => "KeyboardAidToggled",
+        Message::DwellClickType { .. } => "DwellClickType",
+        Message::PointerTimeout { .. } => "PointerTimeout",
     }
 }
 

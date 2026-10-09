@@ -50,3 +50,5 @@ pub const END_SESSION_NAMESPACE: &str = "tuna-shell-end-session";
 pub const PREVIEW_CHROME_NAMESPACE: &str = "tuna-shell-preview-chrome";
 /// GTK keyboard-accessibility confirmation surface (Sticky/Slow Keys).
 pub const KBD_A11Y_NAMESPACE: &str = "tuna-kbd-a11y";
+/// GTK pointer-accessibility pie timer surface (hover and secondary click).
+pub const POINTER_A11Y_NAMESPACE: &str = "tuna-pointer-a11y";
