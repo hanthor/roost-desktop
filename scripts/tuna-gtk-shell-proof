@@ -2592,8 +2592,9 @@ while [ "$(date +%s)" -le "$corner_end" ]; do
     corner_restored_rect="$corner_rect_now"
     sleep 0.5
 done
-[ -n "$corner_restored_rect" ] && [ "$corner_restored_rect" != null ] ||
+if [ -z "$corner_restored_rect" ] || [ "$corner_restored_rect" = null ]; then
     fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window never settled in place"
+fi
 cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
