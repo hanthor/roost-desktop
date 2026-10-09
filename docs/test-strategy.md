@@ -93,6 +93,7 @@ Spec 000 establishes distributions; spec 006 applies the project targets on the 
 - No monotonic unexplained memory growth over a 24-hour soak beyond documented bounded caches.
 - Report p50/p95/p99, sample count, variance, missed deadlines, idle CPU, GPU memory, startup, and environmental state.
 - Rerun noisy samples under the documented rule; do not silently discard unfavorable runs. Threshold changes require an evidence-backed ADR.
+- Regression gate (#315): a nightly paired run checks per-phase CPU, overview response and frame pacing against GNOME-relative budgets in `docs/perf/budgets.json`. The budgets only ratchet tighter ([ADR 0008](adr/0008-performance-regression-budgets.md), [docs/perf/README.md](perf/README.md#regression-gate-315)).
 
 ## 6. CI and release cadence
 
