@@ -128,10 +128,26 @@ def check_panel(path):
     return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
 
 
+# tuna-rename: keep-begin
+# The published flavor can still ship the package from before the rename
+# (#505) until `tuna-desktop` lands there; its binaries keep the roost-
+# prefix. Guest process checks compare roles, not the shipped prefix.
+LEGACY_GUEST_PREFIXES = ("roost-",)
+# tuna-rename: keep-end
+
+
+def guest_role(executable):
+    """A guest executable name with a pre-rename prefix normalized to tuna-."""
+    for prefix in LEGACY_GUEST_PREFIXES:
+        if executable.startswith(prefix):
+            return "tuna-" + executable[len(prefix):]
+    return executable
+
+
 def predates_newer_snapshot(state):
     """True when the guest compositor predates the newer snapshot keys.
 
-    Run 37700332957: the published tuna-desktop 0.1.0-2 guest runs a healthy
+    Run 37700332957: the published pre-rename 0.1.0-2 guest runs a healthy
     session whose snapshot reports every newer instrumentation key as None
     (mouse_left_handed, pointer_position, native_relative_motion_count,
     hot_corners), and its shell predates the Oct-4 media-key volume behavior
@@ -218,7 +234,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         names = {"tuna-compositor", "gnome-disks", "gnome-system-monitor", "nautilus"}
         if shell:
             names.add("tuna-shell-gtk")
-        identities = lambda value: [p for p in value["processes"] if p["executable"] in names]
+        identities = lambda value: [p for p in value["processes"] if guest_role(p["executable"]) in names]
         return (before["state"]["windows"] == after["state"]["windows"]
                 and identities(before) == identities(after))
 
@@ -328,7 +344,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                and before["session"]["User"] == str(before["session_uid"])
                and before["session"]["Service"] == "greetd"
                and all(p["uid"] == before["session_uid"] for p in before["processes"]))
-    intact = expected <= {p["executable"] for p in before["processes"]} and len(before["state"]["windows"]) >= 3
+    intact = expected <= {guest_role(p["executable"]) for p in before["processes"]} and len(before["state"]["windows"]) >= 3
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
@@ -1080,7 +1096,7 @@ def greetd_login(qmp, agent_path, out, record):
                 owner = agent.run("inventory")
                 if (owner["session_uid"] != 0 and owner["session"]["Service"] == "greetd"
                         and owner["session"]["User"] == str(owner["session_uid"])
-                        and any(p["executable"] == "tuna-compositor" for p in owner["processes"])):
+                        and any(guest_role(p["executable"]) == "tuna-compositor" for p in owner["processes"])):
                     record("V-GREETD-LOGIN", True,
                            "shipped non-root gtkgreet → username/password PAM login → real non-root greetd Tuna Desktop session; payload hashes unchanged")
                     return True
@@ -1133,7 +1149,7 @@ class Recorder:
 def lock_chord_hold_ms(older_guest):
     """How long the tour holds Super+L before releasing both keys.
 
-    Run 37727015469: the published tuna-desktop 0.1.0-2 guest predates a3647b59
+    Run 37727015469: the published pre-rename 0.1.0-2 guest predates a3647b59
     (Oct 6), which made the compositor account for key releases it consumes
     while a lock is pending. On that guest a quick Super release lands
     before the lock surface maps, is dropped, and leaves Super latched in
@@ -1586,7 +1602,7 @@ def main():
                 manager_ready = (owner["probe_uid"] == 0 and owner["session_uid"] != 0
                                  and owner["session"]["User"] == str(owner["session_uid"])
                                  and owner["session"]["Service"] == "greetd"
-                                 and any(p["executable"] == "tuna-compositor" and p["uid"] == owner["session_uid"]
+                                 and any(guest_role(p["executable"]) == "tuna-compositor" and p["uid"] == owner["session_uid"]
                                          for p in owner["processes"]))
                 with open(os.path.join(out, "session-owner.json"), "w") as stream:
                     json.dump(owner, stream, indent=2)

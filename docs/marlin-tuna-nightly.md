@@ -1,6 +1,7 @@
 # Published Marlin Tuna Desktop nightly
 
-The `marlin-tuna-nightly` workflow resolves `ghcr.io/tuna-os/marlin:tuna`
+The `marlin-tuna-nightly` workflow resolves the published TunaOS Marlin
+flavor <!-- tuna-rename: keep -->(`ghcr.io/tuna-os/marlin:roost` until the `tuna` flavor is published)
 to an immutable digest and installs a CI fixture layer on that published
 flavor. It does not rebuild or replace Tuna Desktop. The fixture requires every
 shipped package version to remain present unchanged, and checks hashes of
@@ -13,6 +14,15 @@ the existing application tour, plus serial capture. A test-user profile
 exports the introspection path and directs session output to the journal.
 It preserves the selected `tuna-session` command and the shipped greeter
 wrapper and styling. An initial/autologin session is rejected.
+
+<!-- tuna-rename: keep-begin -->
+Until the `tuna-desktop` package reaches the published flavor, that image
+still ships the package from before the rename (#505), with `roost-`
+prefixed binaries, session entry, PAM service and environment variables.
+The fixture, probes and profile detect which identity the guest ships and
+check that one. The current-source `marlin-vm` lane installs
+`tuna-desktop`, so it always checks the new names.
+<!-- tuna-rename: keep-end -->
 
 Each of five pristine snapshot boots waits for the actual non-root
 gtkgreet process, types the fixture username and password through QMP,

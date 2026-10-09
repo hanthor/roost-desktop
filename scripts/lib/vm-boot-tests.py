@@ -19,6 +19,14 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 
 
+def guest_identity(prefix="tuna"):
+    """The lifecycle helper's shipped-identity globals for a guest prefix."""
+    compositor = f"{prefix}-compositor"
+    return {"PREFIX": prefix, "COMPOSITOR": compositor, "COMPOSITOR_COMM": compositor[:15],
+            "SHELL_GTK": f"{prefix}-shell-gtk", "NESTED": f"{prefix}-nested-",
+            "LOCK_PAM": f"/etc/pam.d/{prefix}-lock"}
+
+
 class OrcaUnreadyDiagnostic(unittest.TestCase):
     def run_probe(self, *, locked=False, changed=False, executable="/usr/bin/python3.14",
                   uid=1000, package="python", oversized=False, replaced=False):
@@ -43,7 +51,7 @@ class OrcaUnreadyDiagnostic(unittest.TestCase):
                          "/usr/bin/tuna-compositor" if path.parent.name == "87" else executable,
                          stat=lambda path: SimpleNamespace(st_dev=1, st_ino=next(executable_reads), st_size=100)),
                      "json": json, "subprocess": __import__("subprocess"),
-                     "call": lambda *args: package}
+                     "call": lambda *args: package, **guest_identity()}
             # Keep genuine file reads; only controlled /proc path/UID/exec fixtures substitute.
             exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), scope)
             original_stat = Path.stat
@@ -462,7 +470,7 @@ class ShippedSnapshotInventory(unittest.TestCase):
     SHIPPED_STATE = {"locked": False, "windows": [], "focused": None,
                      "active_workspace": 0, "overview_open": True}
 
-    def run_inventory(self, state, sessions):
+    def run_inventory(self, state, sessions, prefix="tuna"):
         source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         function = next(node for node in ast.parse(source.read_text()).body
                         if isinstance(node, ast.FunctionDef) and node.name == "inventory")
@@ -471,10 +479,11 @@ class ShippedSnapshotInventory(unittest.TestCase):
             root = Path(directory)
             proc = root / "proc"
             (proc / "1234").mkdir(parents=True)
-            (root / "tuna-compositor").touch()
-            (proc / "1234/exe").symlink_to(root / "tuna-compositor")
+            identity = guest_identity(prefix)
+            (root / identity["COMPOSITOR"]).touch()
+            (proc / "1234/exe").symlink_to(root / identity["COMPOSITOR"])
             fields = ["S", "1"] + ["0"] * 17 + ["4242"]
-            (proc / "1234/stat").write_text("1234 (tuna-composito) " + " ".join(fields))
+            (proc / "1234/stat").write_text(f"1234 ({identity['COMPOSITOR_COMM']}) " + " ".join(fields))
             state_path = root / "tuna-vm-state.json"
             state_path.write_text(json.dumps(state))
             descriptions = {
@@ -496,7 +505,7 @@ class ShippedSnapshotInventory(unittest.TestCase):
                          Path=lambda path: proc if str(path) == "/proc" else real_pathlib.Path(path)),
                      "OWNER": SimpleNamespace(pw_uid=uid, pw_name="tuna-test"),
                      "RUNTIME": f"/run/user/{uid}", "STATE": state_path,
-                     "call": fake_call}
+                     "call": fake_call, **identity}
             exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
             return scope["inventory"]()
 
@@ -514,6 +523,17 @@ class ShippedSnapshotInventory(unittest.TestCase):
         self.assertTrue(result["state"]["overview_open"])
         self.assertIsNone(result["state"]["pointer_position"])
         self.assertIsNone(result["state"]["native_relative_motion_count"])
+
+    def test_published_guest_with_pre_rename_binaries_still_detects_session(self):
+        # The published flavor can still ship the package from before #505.
+        uid = os.getuid()
+        result = self.run_inventory(dict(self.SHIPPED_STATE), [
+            ("1", "959 greeter seat0 tty1"),
+            ("3", f"{uid} tuna-test seat0 tty1"),
+        ], prefix="roost")  # tuna-rename: keep
+        self.assertEqual(result["session"]["Id"], "3")
+        self.assertEqual([p["executable"] for p in result["processes"]],
+                         ["roost-compositor"])  # tuna-rename: keep
 
     def test_missing_owner_session_still_rejected(self):
         uid = os.getuid()

@@ -18,6 +18,19 @@ import shlex
 OWNER = pwd.getpwnam("tuna-test")
 RUNTIME = f"/run/user/{OWNER.pw_uid}"
 STATE = pathlib.Path(RUNTIME, "tuna-vm-state.json")
+# tuna-rename: keep-begin
+# The published flavor can still ship the package from before the rename
+# (#505) until `tuna-desktop` lands there. That guest's binaries, nested
+# display names, wallpaper drop and PAM service keep the roost- prefix, so
+# probes follow whichever identity the guest actually ships.
+PREFIX = "tuna" if pathlib.Path("/usr/bin/tuna-compositor").exists() else "roost"
+PACKAGE = "tuna-desktop" if PREFIX == "tuna" else "roost"
+# tuna-rename: keep-end
+COMPOSITOR = f"{PREFIX}-compositor"
+COMPOSITOR_COMM = COMPOSITOR[:15]  # /proc/<pid>/comm keeps 15 bytes.
+SHELL_GTK = f"{PREFIX}-shell-gtk"
+NESTED = f"{PREFIX}-nested-"
+LOCK_PAM = f"/etc/pam.d/{PREFIX}-lock"
 
 
 def call(*args, user=False, check=True):
@@ -67,7 +80,7 @@ def inventory():
             uid = path.stat().st_uid
             executable = pathlib.Path(os.readlink(path / "exe")).name
             if uid != OWNER.pw_uid or executable not in {
-                "tuna-compositor", "tuna-shell-gtk", "gnome-disks",
+                COMPOSITOR, SHELL_GTK, "gnome-disks",
                 "gnome-system-monitor", "nautilus",
             }:
                 continue
@@ -130,8 +143,8 @@ def constraint_client(action):
     if action == "start":
         if CONSTRAINT_OWNER.exists() or pathlib.Path(RUNTIME, "tuna-vm-constraints.sock").exists():
             raise RuntimeError("original constraint principal already exists")
-        compositor = next(process for process in inventory()["processes"] if process["executable"] == "tuna-compositor")
-        display = f"tuna-nested-{compositor['pid']}"
+        compositor = next(process for process in inventory()["processes"] if process["executable"] == COMPOSITOR)
+        display = f"{NESTED}{compositor['pid']}"
         with CONSTRAINT_LOG.open("xb") as log:
             os.chmod(CONSTRAINT_LOG, 0o600)
             subprocess.Popen(["runuser", "-u", OWNER.pw_name, "--", "env", f"XDG_RUNTIME_DIR={RUNTIME}",
@@ -227,10 +240,10 @@ def orca_child_diagnostic(state, pid):
         parent_path = pathlib.Path(f"/proc/{parent}")
         parent_before = bounded(parent_path / "stat", 4096)
         if (uid != OWNER.pw_uid or parent_path.stat().st_uid != OWNER.pw_uid
-                or os.readlink(parent_path / "exe") != "/usr/bin/tuna-compositor"):
+                or os.readlink(parent_path / "exe") != f"/usr/bin/{COMPOSITOR}"):
             return {"status": "principal-refused"}
         environment = bounded(process / "environ", 128 * 1024)
-        expected = f"tuna-nested-{parent}".encode()
+        expected = f"{NESTED}{parent}".encode()
         displays = [item.split(b"=", 1)[1] for item in environment.split(b"\0")
                     if item.startswith(b"WAYLAND_DISPLAY=")]
         session_buses = [item.split(b"=", 1)[1] for item in environment.split(b"\0")
@@ -247,7 +260,7 @@ def orca_child_diagnostic(state, pid):
                 or bounded(parent_path / "stat", 4096).decode().rsplit(")", 1)[1].split()[19]
                    != parent_before.decode().rsplit(")", 1)[1].split()[19]
                 or parent_path.stat().st_uid != OWNER.pw_uid
-                or os.readlink(parent_path / "exe") != "/usr/bin/tuna-compositor"
+                or os.readlink(parent_path / "exe") != f"/usr/bin/{COMPOSITOR}"
                 or (executed_after.st_dev, executed_after.st_ino, executed_after.st_size)
                    != (executed.st_dev, executed.st_ino, executed.st_size)
                 or type(final_state) is not dict or final_state.get("locked") is not False
@@ -335,8 +348,8 @@ def orca_observation():
                   "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
                   "s", name, user=True) == owner_reply
     compositor = next(item for item in inventory()["processes"]
-                      if item["executable"] == "tuna-compositor")
-    expected_display = f"tuna-nested-{compositor['pid']}"
+                      if item["executable"] == COMPOSITOR)
+    expected_display = f"{NESTED}{compositor['pid']}"
     result.update({"uid": uid, "start_ticks": ticks, "display": displays,
                    "parent_pid": parent_pid, "compositor_pid": compositor["pid"],
                    "executable": os.readlink(process / "exe"), "version": version,
@@ -373,7 +386,7 @@ def background_user_diagnostics():
             result["settings"][schema] = {"error": str(error)}
     interface = Gio.Settings.new("org.gnome.desktop.interface")
     result["color_scheme"] = interface.get_string("color-scheme")
-    path = pathlib.Path(RUNTIME, "tuna-wallpaper")
+    path = pathlib.Path(RUNTIME, f"{PREFIX}-wallpaper")
     identity = lambda m: {"dev": m.st_dev, "ino": m.st_ino, "bytes": m.st_size,
                           "uid": m.st_uid, "mode": m.st_mode,
                           "mtime_ns": m.st_mtime_ns, "ctime_ns": m.st_ctime_ns}
@@ -513,7 +526,7 @@ def main():
             try:
                 stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
                 name = (path / "comm").read_text().strip()
-                if name in {"chvt", "python3", "tuna-composito", "systemd-logind", "qemu-ga"}:
+                if name in {"chvt", "python3", COMPOSITOR_COMM, "systemd-logind", "qemu-ga"}:
                     processes.append({"pid": int(path.name), "name": name, "state": stat[0],
                                       "wait_site": (path / "wchan").read_text().strip()})
             except (FileNotFoundError, PermissionError, ProcessLookupError):
@@ -534,7 +547,7 @@ def main():
              user=True)
         result = {"requested": "lock"}
     elif action == "delay-unlock":
-        service = pathlib.Path("/etc/pam.d/tuna-lock")
+        service = pathlib.Path(LOCK_PAM)
         original = service.read_text()
         service.rename(service.with_suffix(".vm-backup"))
         # Keep the real PAM result below its 10-second authentication deadline,
@@ -543,7 +556,7 @@ def main():
         service.write_text("auth required pam_exec.so /usr/bin/sleep 8\n" + original)
         result = {"pam": "real stack delayed"}
     elif action == "delayed-auth-state":
-        compositor = next(p for p in inventory()["processes"] if p["executable"] == "tuna-compositor")
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == COMPOSITOR)
         waiting = False
         for path in pathlib.Path("/proc").iterdir():
             if not path.name.isdigit():
@@ -558,17 +571,17 @@ def main():
         result = {"real_pam_delay_running": waiting}
     elif action == "deny-unlock":
         # Real PAM failure, not a substitute authenticator or fake daemon.
-        service = pathlib.Path("/etc/pam.d/tuna-lock")
+        service = pathlib.Path(LOCK_PAM)
         service.rename(service.with_suffix(".vm-backup"))
         service.write_text("auth required pam_deny.so\naccount required pam_deny.so\n")
         result = {"pam": "deny"}
     elif action == "restore-unlock":
-        pathlib.Path("/etc/pam.d/tuna-lock.vm-backup").rename("/etc/pam.d/tuna-lock")
+        pathlib.Path(LOCK_PAM + ".vm-backup").rename(LOCK_PAM)
         result = {"pam": "restored"}
     elif action == "kill-shell":
         processes = inventory()["processes"]
         for process in processes:
-            if process["executable"] == "tuna-shell-gtk":
+            if process["executable"] == SHELL_GTK:
                 os.kill(process["pid"], 9)
         result = {"killed": "shell"}
     elif action == "stop-portal":
@@ -576,9 +589,9 @@ def main():
              "xdg-desktop-portal-gnome.service", user=True)
         result = {"stopped": "portal"}
     elif action == "capture-input":
-        compositor = next(p for p in inventory()["processes"] if p["executable"] == "tuna-compositor")
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == COMPOSITOR)
         # The actual DRM session uses this socket, as runtime::default_for_pid does.
-        display = f"WAYLAND_DISPLAY=tuna-nested-{compositor['pid']}"
+        display = f"WAYLAND_DISPLAY={NESTED}{compositor['pid']}"
         def attempt(*args):
             try:
                 result = subprocess.run(["runuser", "-u", OWNER.pw_name, "--", "env",
@@ -593,11 +606,11 @@ def main():
                   "input_exit": attempt("wtype", "untrusted-input"),
                   "capture_file": pathlib.Path("/tmp/tuna-vm-forbidden-capture.png").exists()}
     elif action == "start-input-probe":
-        compositor = next(p for p in inventory()["processes"] if p["executable"] == "tuna-compositor")
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == COMPOSITOR)
         subprocess.Popen(["runuser", "-u", OWNER.pw_name, "--", "env",
                           f"XDG_RUNTIME_DIR={RUNTIME}",
                           f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus",
-                          f"WAYLAND_DISPLAY=tuna-nested-{compositor['pid']}",
+                          f"WAYLAND_DISPLAY={NESTED}{compositor['pid']}",
                           "/usr/libexec/tuna-vm-input"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
         result = {"started": "count-only GTK input probe"}
@@ -638,12 +651,12 @@ def main():
                   "greeter_pids": greeter_pids,
                   "greeter_uids": [pathlib.Path(f"/proc/{pid}").stat().st_uid for pid in greeter_pids],
                   "compositor_pids": call("pgrep", "-u", str(OWNER.pw_uid), "-x",
-                                          "tuna-composito", check=False).splitlines()}
+                                          COMPOSITOR_COMM, check=False).splitlines()}
     elif action == "published":
         payload = pathlib.Path("/usr/share/tuna-vm/shipped-payload.sha256")
         call("sha256sum", "--check", str(payload))
         package = pathlib.Path("/usr/share/tuna-vm/shipped-package.txt").read_text().strip()
-        if call("pacman", "-Q", "tuna") != package:
+        if call("pacman", "-Q", PACKAGE) != package:
             raise RuntimeError("shipped Tuna Desktop package changed")
         result = {"probe_uid": os.geteuid(), "package": package,
                   "payload_sha256": payload.read_text().splitlines(),

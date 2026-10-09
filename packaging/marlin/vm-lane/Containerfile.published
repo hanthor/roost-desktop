@@ -11,16 +11,22 @@ COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-tuna-vm-lane.
 COPY packaging/marlin/vm-lane/tuna-vm-health /usr/libexec/tuna-vm-health
 COPY packaging/marlin/vm-lane/tuna-vm-health.service /usr/lib/systemd/system/tuna-vm-health.service
 
+# tuna-rename: keep-begin
+# Until `tuna-desktop` and the tunaOS `tuna` flavor are published, the
+# flavor ships the pre-rename `roost` package: its binaries and greetd
+# session entry keep the roost- prefix. Fixtures follow whichever one ships.
 RUN mkdir -p /usr/share/tuna-vm \
-    && pacman -Q tuna-desktop > /usr/share/tuna-vm/shipped-package.txt \
+    && if pacman -Q tuna-desktop >/dev/null 2>&1; then package=tuna-desktop prefix=tuna; \
+       else package=roost prefix=roost; fi \
+    && pacman -Q "$package" > /usr/share/tuna-vm/shipped-package.txt \
     && pacman -Q > /usr/share/tuna-vm/shipped-packages.txt \
-    && sha256sum /usr/bin/tuna-session /usr/bin/tuna-compositor \
-         /usr/bin/tuna-shell-host /usr/bin/tuna-shell-gtk \
-         /usr/bin/tuna-ibus-bridge /usr/bin/tuna-greeter \
+    && sha256sum "/usr/bin/$prefix-session" "/usr/bin/$prefix-compositor" \
+         "/usr/bin/$prefix-shell-host" "/usr/bin/$prefix-shell-gtk" \
+         "/usr/bin/$prefix-ibus-bridge" "/usr/bin/$prefix-greeter" \
          /usr/libexec/tunaos/greetd-session /etc/greetd/config.toml /etc/greetd/gtkgreet.css \
          /etc/greetd/environments > /usr/share/tuna-vm/shipped-payload.sha256 \
+    && grep -qx "$prefix-session" /etc/greetd/environments \
     && test "$(readlink -f /bin/sh)" = /usr/bin/bash \
-    && grep -qx 'tuna-session' /etc/greetd/environments \
     && grep -q '/usr/libexec/tunaos/greetd-session' /etc/greetd/config.toml \
     && ! grep -q '\[initial_session\]' /etc/greetd/config.toml \
     && pacman -Sy --noconfirm \
@@ -34,5 +40,6 @@ RUN mkdir -p /usr/share/tuna-vm \
     && sha256sum --check /usr/share/tuna-vm/shipped-payload.sha256 \
     && pacman -Q > /usr/share/tuna-vm/fixture-packages.txt \
     && python3 -c 'from pathlib import Path; p=Path("/usr/share/tuna-vm"); before=set((p/"shipped-packages.txt").read_text().splitlines()); after=set((p/"fixture-packages.txt").read_text().splitlines()); assert before <= after, "fixture installation changed shipped package versions"'
+# tuna-rename: keep-end
 
 LABEL org.opencontainers.image.title="marlin-tuna-published-vm-fixtures"

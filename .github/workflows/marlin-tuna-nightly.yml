@@ -40,8 +40,12 @@ jobs:
           test -w /dev/kvm
       - name: Resolve published flavor and add fixtures without replacing payload
         run: |
-          sudo podman pull ghcr.io/tuna-os/marlin:tuna
-          sudo podman image inspect ghcr.io/tuna-os/marlin:tuna --format '{{.Digest}}' | tee /mnt/vm/published-digest
+          # tuna-rename: keep-begin
+          # The tunaOS flavor keeps its pre-rename tag until the `tuna`
+          # flavor is published (#505); it still ships the `roost` package.
+          sudo podman pull ghcr.io/tuna-os/marlin:roost
+          sudo podman image inspect ghcr.io/tuna-os/marlin:roost --format '{{.Digest}}' | tee /mnt/vm/published-digest
+          # tuna-rename: keep-end
           digest=$(cat /mnt/vm/published-digest)
           test "${digest#sha256:}" != "$digest"
           sudo podman build -f packaging/marlin/vm-lane/Containerfile.published \
@@ -89,7 +93,8 @@ jobs:
           excerpt = []
           for path in out.rglob('serial.log'):
               for line in path.read_text(errors='replace').splitlines():
-                  if any(marker in line for marker in ('tuna-vm-health:', 'tuna-compositor: drm:', 'shell supervision: BudgetExhausted')):
+                  if any(marker in line for marker in ('tuna-vm-health:', 'tuna-compositor: drm:', 'roost-compositor: drm:',  # tuna-rename: keep
+                                                                'shell supervision: BudgetExhausted')):
                       excerpt.append(line)
           (out / 'failure.json').write_text(json.dumps({
               'run_id': os.environ['RUN_ID'], 'run_url': os.environ['RUN_URL'],
