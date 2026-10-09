@@ -2771,4 +2771,52 @@ mod tests {
         assert!((motion.progress() - ease_out_sine(0.5)).abs() < 1e-9);
         assert_eq!(motion.diagnostics()["open"]["duration_ms"], 500.0);
     }
+
+    #[test]
+    fn fading_overview_elements_are_never_drawn_opaque() {
+        // Occlusion culling (#503) trusts `opaque_regions`, which smithay
+        // empties below alpha 1: every element part-way through a fade
+        // must carry that alpha so nothing beneath it is culled.
+        let windows = [win(1, 0, 320, 182, 640, 420), win(2, 1, 320, 182, 640, 420)];
+        let open = layout(output(), 32, &[0, 1], 0, &windows);
+        let mid = transition(&open, 0.4, output(), &windows);
+        for card in mid
+            .cards
+            .iter()
+            .filter(|c| !c.active)
+            .chain(&mid.thumbnails)
+        {
+            assert!(card.alpha < 1.0, "{card:?}");
+        }
+        assert!(mid
+            .previews
+            .iter()
+            .filter(|p| !p.active)
+            .all(|p| p.alpha < 1.0));
+        let mut motion = OverviewMotion::default();
+        opened(&mut motion);
+        motion.step_scene(0.0, &open, cues(false, false), None, AWAY);
+        motion.step_scene(60.0, &open, cues(false, true), None, AWAY);
+        let searching = motion.scene(&open, None, AWAY, output(), &windows);
+        assert!(searching.cards.iter().all(|c| c.alpha < 1.0));
+        assert!(searching.thumbnails.iter().all(|c| c.alpha < 1.0));
+        assert!(searching.previews.iter().all(|p| p.alpha < 1.0));
+        // Leaving a morph: what goes fades, never opaque on its way out.
+        let fewer = layout(output(), 32, &[0], 0, &windows[..1]);
+        let mut motion = OverviewMotion::default();
+        opened(&mut motion);
+        motion.step_scene(0.0, &open, cues(false, false), None, AWAY);
+        motion.step_scene(0.0, &fewer, cues(false, false), None, AWAY);
+        motion.step_scene(50.0, &fewer, cues(false, false), None, AWAY);
+        let leaving = motion.scene(&fewer, None, AWAY, output(), &windows);
+        assert!(leaving.thumbnails.iter().all(|t| t.alpha < 1.0));
+        assert!(leaving
+            .previews
+            .iter()
+            .filter(|p| !fewer
+                .previews
+                .iter()
+                .any(|f| f.id == p.id && f.active == p.active))
+            .all(|p| p.alpha < 1.0));
+    }
 }

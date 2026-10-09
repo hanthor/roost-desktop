@@ -1651,7 +1651,7 @@ impl Runtime {
             .collect::<serde_json::Map<_, _>>()
             .into();
         // Windows whose frame callbacks run at the hidden rate.
-        doc["throttled_windows"] = if self.overview_progress > 0.0
+        doc["throttled_windows"] = if self.overview_motion.progress() > 0.0
             || !self.switcher_thumbnails.is_empty()
             || !self.casts.is_empty()
         {
