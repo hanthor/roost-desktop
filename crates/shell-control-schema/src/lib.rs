@@ -158,9 +158,15 @@ impl ProtocolVersion {
     /// `0.28` replaces `InputSettings::enable_animations` with `motion`,
     /// GNOME's three-state motion policy plus its slow-down factor.
     /// The positional postcard body changes, so both peers ship together.
+    ///
+    /// `0.29` appends the shell-to-compositor `SetWmSettings` and
+    /// `ToggleShowDesktop` commands (GNOME's Multitasking and window
+    /// manager preferences, #337 and #347) and the fullscreen, raise and
+    /// lower, axis-maximize, monitor and placement keys to `WindowAction`,
+    /// all last, so earlier discriminants are untouched.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 28,
+        minor: 29,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -376,6 +382,132 @@ pub enum CommandKind {
     /// Preference from the authenticated supervised shell. Nested runtimes
     /// ignore it; the hardware compositor owns the actual Orca child.
     SetScreenReader { enabled: bool },
+    /// GNOME's Multitasking and window-manager preferences (#337, #347),
+    /// as the shell reads them from GSettings. Sent at start and on
+    /// every change; the compositor applies them live.
+    SetWmSettings(WmSettings),
+    /// GNOME's `show-desktop` key: hide every window on the active
+    /// workspace, or bring the hidden ones back.
+    ToggleShowDesktop,
+}
+
+/// `org.gnome.desktop.wm.preferences focus-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FocusMode {
+    /// Focus on click (GNOME's default).
+    #[default]
+    Click,
+    /// The window under the pointer takes focus; the desktop keeps it.
+    Sloppy,
+    /// The window under the pointer takes focus; the desktop takes it
+    /// away.
+    Mouse,
+}
+
+impl FocusMode {
+    /// The GSettings nick (`click`, `sloppy`, `mouse`); unknown nicks
+    /// are GNOME's default.
+    pub fn from_nick(nick: &str) -> Self {
+        match nick {
+            "sloppy" => Self::Sloppy,
+            "mouse" => Self::Mouse,
+            _ => Self::Click,
+        }
+    }
+}
+
+/// `org.gnome.desktop.wm.preferences focus-new-windows`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FocusNewWindows {
+    /// New windows take focus (GNOME's default).
+    #[default]
+    Smart,
+    /// New windows do not take focus from a focused window; they open
+    /// just below it.
+    Strict,
+}
+
+impl FocusNewWindows {
+    /// The GSettings nick; unknown nicks are GNOME's default.
+    pub fn from_nick(nick: &str) -> Self {
+        if nick == "strict" {
+            Self::Strict
+        } else {
+            Self::Smart
+        }
+    }
+}
+
+/// Upper bound on `num-workspaces` (the GSettings range is 1..=36).
+pub const MAX_WORKSPACES: u32 = 36;
+
+/// GNOME's Multitasking and window-manager preferences
+/// (`org.gnome.mutter` and `org.gnome.desktop.wm.preferences`),
+/// flattened for the compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WmSettings {
+    /// `org.gnome.mutter dynamic-workspaces`.
+    pub dynamic_workspaces: bool,
+    /// `num-workspaces`, the fixed count when not dynamic (1..=36).
+    pub num_workspaces: u32,
+    /// `org.gnome.mutter workspaces-only-on-primary`: windows on other
+    /// monitors show on every workspace.
+    pub workspaces_only_on_primary: bool,
+    /// `org.gnome.mutter edge-tiling`: dropping a dragged window on a
+    /// screen edge tiles or maximizes it.
+    pub edge_tiling: bool,
+    /// `focus-mode`.
+    pub focus_mode: FocusMode,
+    /// `org.gnome.mutter focus-change-on-pointer-rest`: pointer focus
+    /// waits for the pointer to stop.
+    pub focus_change_on_pointer_rest: bool,
+    /// `focus-new-windows`.
+    pub focus_new_windows: FocusNewWindows,
+    /// `auto-raise` and `auto-raise-delay` (milliseconds).
+    pub auto_raise: bool,
+    pub auto_raise_delay_ms: u32,
+    /// `raise-on-click`.
+    pub raise_on_click: bool,
+    /// `mouse-button-modifier` as `MOD_*` bits; 0 disables modifier
+    /// drags.
+    pub mouse_button_modifier: u32,
+    /// `resize-with-right-button`: the modifier plus the right button
+    /// resizes (and the middle one opens the window menu).
+    pub resize_with_right_button: bool,
+    /// `org.gnome.mutter attach-modal-dialogs`.
+    pub attach_modal_dialogs: bool,
+    /// `org.gnome.mutter center-new-windows`.
+    pub center_new_windows: bool,
+}
+
+impl Default for WmSettings {
+    /// GNOME 51's defaults.
+    fn default() -> Self {
+        Self {
+            dynamic_workspaces: true,
+            num_workspaces: 4,
+            workspaces_only_on_primary: true,
+            edge_tiling: true,
+            focus_mode: FocusMode::Click,
+            focus_change_on_pointer_rest: true,
+            focus_new_windows: FocusNewWindows::Smart,
+            auto_raise: false,
+            auto_raise_delay_ms: 500,
+            raise_on_click: true,
+            mouse_button_modifier: MOD_LOGO,
+            resize_with_right_button: false,
+            attach_modal_dialogs: true,
+            center_new_windows: false,
+        }
+    }
+}
+
+impl WmSettings {
+    /// The fixed workspace count, or `None` while workspaces are
+    /// dynamic. Out-of-range counts clamp to GSettings' range.
+    pub fn fixed_workspaces(&self) -> Option<u32> {
+        (!self.dynamic_workspaces).then(|| self.num_workspaces.clamp(1, MAX_WORKSPACES))
+    }
 }
 
 /// Screen Reader process lifecycle, not proof of spoken usability.
@@ -492,6 +624,54 @@ pub enum WindowAction {
     ToggleTiledLeft,
     /// Tile the right half, or untile (`toggle-tiled-right`).
     ToggleTiledRight,
+    /// Fullscreen, or leave it (`toggle-fullscreen`).
+    ToggleFullscreen,
+    /// Raise to the top of its layer (`raise`).
+    Raise,
+    /// Lower to the bottom (`lower`).
+    Lower,
+    /// Lower when nothing covers it, else raise (`raise-or-lower`).
+    RaiseOrLower,
+    /// Fill the work area's height, or give it back
+    /// (`maximize-vertically`).
+    MaximizeVertically,
+    /// Fill the work area's width, or give it back
+    /// (`maximize-horizontally`).
+    MaximizeHorizontally,
+    /// Move to the neighboring monitor (`move-to-monitor-*`).
+    MoveToMonitor {
+        /// Which neighbor.
+        direction: Direction,
+    },
+    /// Move to a corner, a side or the center of the work area
+    /// (`move-to-corner-*`, `move-to-side-*`, `move-to-center`).
+    MoveTo {
+        /// Where.
+        gravity: Gravity,
+    },
+}
+
+/// A neighbor direction (monitors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// A spot in the work area a window moves to: Mutter's gravities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Gravity {
+    NorthWest,
+    North,
+    NorthEast,
+    West,
+    Center,
+    East,
+    SouthWest,
+    South,
+    SouthEast,
 }
 
 /// Grabbed accelerators held at once.
@@ -725,6 +905,12 @@ pub enum Message {
 /// the last occupied one, and the active one counts too.
 pub fn dynamic_workspace_count(max_occupied: Option<u32>, active: u32) -> u32 {
     max_occupied.map_or(1, |m| m + 2).max(active + 1)
+}
+
+/// The workspace count under GNOME's Multitasking policy: `fixed`
+/// workspaces (`dynamic-workspaces` off), else the dynamic count.
+pub fn workspace_count(fixed: Option<u32>, max_occupied: Option<u32>, active: u32) -> u32 {
+    fixed.unwrap_or_else(|| dynamic_workspace_count(max_occupied, active))
 }
 
 /// One window preview in the overview, in output logical pixels.
@@ -1234,8 +1420,102 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_28() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
+    fn current_version_is_0_29() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 29));
+    }
+
+    #[test]
+    fn wm_settings_survive_the_positional_control_wire() {
+        roundtrip(&Message::Command {
+            id: 1,
+            kind: CommandKind::SetWmSettings(WmSettings::default()),
+        });
+        roundtrip(&Message::Command {
+            id: 2,
+            kind: CommandKind::SetWmSettings(WmSettings {
+                dynamic_workspaces: false,
+                num_workspaces: 3,
+                workspaces_only_on_primary: false,
+                edge_tiling: false,
+                focus_mode: FocusMode::Mouse,
+                focus_change_on_pointer_rest: false,
+                focus_new_windows: FocusNewWindows::Strict,
+                auto_raise: true,
+                auto_raise_delay_ms: 250,
+                raise_on_click: false,
+                mouse_button_modifier: MOD_ALT,
+                resize_with_right_button: true,
+                attach_modal_dialogs: false,
+                center_new_windows: true,
+            }),
+        });
+        roundtrip(&Message::Command {
+            id: 3,
+            kind: CommandKind::ToggleShowDesktop,
+        });
+    }
+
+    #[test]
+    fn new_window_actions_survive_the_control_wire() {
+        let mut actions = vec![
+            WindowAction::ToggleFullscreen,
+            WindowAction::Raise,
+            WindowAction::Lower,
+            WindowAction::RaiseOrLower,
+            WindowAction::MaximizeVertically,
+            WindowAction::MaximizeHorizontally,
+        ];
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            actions.push(WindowAction::MoveToMonitor { direction });
+        }
+        for gravity in [Gravity::NorthWest, Gravity::Center, Gravity::SouthEast] {
+            actions.push(WindowAction::MoveTo { gravity });
+        }
+        for action in actions {
+            roundtrip(&Message::Command {
+                id: 4,
+                kind: CommandKind::WindowAction { window: 7, action },
+            });
+        }
+    }
+
+    #[test]
+    fn wm_settings_default_to_gnome_51_and_parse_its_nicks() {
+        let wm = WmSettings::default();
+        assert!(wm.dynamic_workspaces && wm.edge_tiling && wm.raise_on_click);
+        assert_eq!(wm.fixed_workspaces(), None);
+        assert_eq!(wm.mouse_button_modifier, MOD_LOGO);
+        let fixed = WmSettings {
+            dynamic_workspaces: false,
+            num_workspaces: 99,
+            ..wm
+        };
+        assert_eq!(fixed.fixed_workspaces(), Some(MAX_WORKSPACES));
+        let none = WmSettings {
+            num_workspaces: 0,
+            ..fixed
+        };
+        assert_eq!(none.fixed_workspaces(), Some(1));
+        assert_eq!(FocusMode::from_nick("sloppy"), FocusMode::Sloppy);
+        assert_eq!(FocusMode::from_nick("mouse"), FocusMode::Mouse);
+        assert_eq!(FocusMode::from_nick("bogus"), FocusMode::Click);
+        assert_eq!(
+            FocusNewWindows::from_nick("strict"),
+            FocusNewWindows::Strict
+        );
+        assert_eq!(FocusNewWindows::from_nick("smart"), FocusNewWindows::Smart);
+    }
+
+    #[test]
+    fn fixed_workspaces_override_the_dynamic_count() {
+        assert_eq!(workspace_count(None, Some(2), 0), 4);
+        assert_eq!(workspace_count(Some(3), Some(2), 0), 3);
+        assert_eq!(workspace_count(Some(1), None, 0), 1);
     }
 
     #[test]
@@ -1335,7 +1615,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 30).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

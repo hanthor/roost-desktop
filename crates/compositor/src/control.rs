@@ -266,6 +266,10 @@ pub struct Session<'a> {
     unlock_pending: Option<u64>,
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<tuna_shell_control::InputSettings>,
+    /// Latest `SetWmSettings` from the shell, drained by the hub.
+    wm_settings: Option<tuna_shell_control::WmSettings>,
+    /// `ToggleShowDesktop` requests, drained by the hub.
+    show_desktop_toggles: u32,
     screen_reader: Option<bool>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
@@ -339,6 +343,8 @@ impl<'a> Session<'a> {
             unlock_request: None,
             unlock_pending: None,
             input_settings: None,
+            wm_settings: None,
+            show_desktop_toggles: 0,
             screen_reader: None,
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
@@ -599,6 +605,29 @@ impl<'a> Session<'a> {
             } => {
                 // Session-level settings for the runtime (seat, libinput).
                 self.input_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetWmSettings(settings),
+            } => {
+                // Window-manager policy for the runtime (#337, #347).
+                self.wm_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::ToggleShowDesktop,
+            } => {
+                self.show_desktop_toggles = self.show_desktop_toggles.saturating_add(1);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -961,6 +990,8 @@ fn apply_command(
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
         | CommandKind::SetScreenReader { .. }
+        | CommandKind::SetWmSettings(_)
+        | CommandKind::ToggleShowDesktop
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -996,6 +1027,10 @@ pub struct PollOutcome {
     pub unlock: Option<(u64, tuna_shell_control::Secret)>,
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<tuna_shell_control::InputSettings>,
+    /// GNOME window-manager settings the shell sent, if any.
+    pub wm_settings: Option<tuna_shell_control::WmSettings>,
+    /// How many times the shell pressed `show-desktop`.
+    pub show_desktop_toggles: u32,
     pub screen_reader: Option<bool>,
     /// Accelerator grabs the shell sent, if they changed.
     pub accelerators: Option<Vec<tuna_shell_control::Accelerator>>,
@@ -1422,6 +1457,12 @@ impl ControlHub {
                     if let Some(settings) = session.input_settings.take() {
                         outcome.input_settings = Some(settings);
                     }
+                    if let Some(settings) = session.wm_settings.take() {
+                        outcome.wm_settings = Some(settings);
+                    }
+                    outcome.show_desktop_toggles = outcome
+                        .show_desktop_toggles
+                        .saturating_add(std::mem::take(&mut session.show_desktop_toggles));
                     if let Some(enabled) = session.screen_reader.take() {
                         outcome.screen_reader = Some(enabled);
                     }

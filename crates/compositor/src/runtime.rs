@@ -1542,6 +1542,71 @@ impl Runtime {
         let x11_ready = self.state.xwm.is_some();
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
+        // GNOME's Multitasking and window-manager policy in force.
+        let policy = self.manager.wm_settings();
+        let policy = serde_json::json!({
+            "fixed_workspaces": policy.fixed_workspaces(),
+            "workspaces_only_on_primary": policy.workspaces_only_on_primary,
+            "edge_tiling": policy.edge_tiling,
+            "focus_mode": format!("{:?}", policy.focus_mode).to_lowercase(),
+            "raise_on_click": policy.raise_on_click,
+            "auto_raise": policy.auto_raise,
+            "mouse_button_modifier": policy.mouse_button_modifier,
+            "attach_modal_dialogs": policy.attach_modal_dialogs,
+            "center_new_windows": policy.center_new_windows,
+        });
+        // Window cards beside the state object: nesting this array
+        // inside `json!` pushes it past the macro's expansion limit.
+        let listed = self.manager.overview_windows();
+        let listed = listed
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "id": w.id,
+                    "app_id": app_of(w.id),
+                    "introspect_eligible": self.manager.is_introspect_eligible(w.id),
+                    "x11_window_id": self.manager.x11_window_id(w.id),
+                    "parent_window_id": self.manager.transient_parent(w.id),
+                    "application_window_id": self.manager.application_window(w.id),
+                    "icon": model.window(w.id).and_then(|w| w.icon.clone()),
+                    "workspace": w.workspace,
+                    "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
+                })
+            })
+            .collect::<Vec<_>>();
+        // Three small objects beside the state object, for the same
+        // macro-expansion budget as the window cards above.
+        let placeholder = scene.as_ref().and_then(|s| s.placeholder).map(|(at, r)| {
+            serde_json::json!({
+                "workspace": at, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
+            })
+        });
+        let tile_preview = self.manager.tile_preview(&self.state).map(|(id, r)| {
+            serde_json::json!({
+                "window": id,
+                "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
+            })
+        });
+        let layers = crate::layer::layer_layout(&self.state)
+            .iter()
+            .filter_map(|(surface, (x, y), _)| {
+                let record = self
+                    .state
+                    .panel_surfaces
+                    .iter()
+                    .find(|r| r.surface == *surface)?;
+                let size = self
+                    .state
+                    .layer_shell_state
+                    .layer_surfaces()
+                    .find(|s| s.wl_surface() == surface)
+                    .and_then(|s| s.current_state().size)?;
+                Some(serde_json::json!({
+                    "namespace": record.namespace,
+                    "rect": [x, y, size.w, size.h],
+                }))
+            })
+            .collect::<Vec<_>>();
         let mut doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
@@ -1563,6 +1628,12 @@ impl Runtime {
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
+            // GNOME's Multitasking and window-manager policy in force.
+            "workspace_count": self.manager.workspace_count(),
+            "workspaces": model.workspaces(),
+            "wm": policy,
+            "showing_desktop": self.manager.showing_desktop(),
+            "stacking": self.manager.stacking_order(),
             "focused": focused,
             "focused_app_id": focused.and_then(app_of),
             "focused_rect": focused
@@ -1593,22 +1664,10 @@ impl Runtime {
                 .map(|w| w.id)
                 .filter(|id| self.manager.is_above(*id))
                 .collect::<Vec<_>>(),
-            "windows": self.manager.overview_windows().iter().map(|w| serde_json::json!({
-                "id": w.id,
-                "app_id": app_of(w.id),
-                "introspect_eligible": self.manager.is_introspect_eligible(w.id),
-                "x11_window_id": self.manager.x11_window_id(w.id),
-                "parent_window_id": self.manager.transient_parent(w.id),
-                "application_window_id": self.manager.application_window(w.id),
-                "icon": model.window(w.id).and_then(|w| w.icon.clone()),
-                "workspace": w.workspace,
-                "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
-            })).collect::<Vec<_>>(),
+            "windows": listed,
             "previews": previews,
             "thumbnails": thumbnails,
-            "workspace_placeholder": scene.as_ref().and_then(|s| s.placeholder).map(|(at, r)| serde_json::json!({
-                "workspace": at, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
-            })),
+            "workspace_placeholder": placeholder,
             "overview_progress": progress,
             "workspace_cards": workspace_cards,
 
@@ -1616,32 +1675,8 @@ impl Runtime {
             "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
             // snap edge: the window and the area it would fill.
-            "tile_preview": self.manager.tile_preview(&self.state).map(|(id, r)| {
-                serde_json::json!({
-                    "window": id,
-                    "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
-                })
-            }),
-            "layers": crate::layer::layer_layout(&self.state)
-                .iter()
-                .filter_map(|(surface, (x, y), _)| {
-                    let record = self
-                        .state
-                        .panel_surfaces
-                        .iter()
-                        .find(|r| r.surface == *surface)?;
-                    let size = self
-                        .state
-                        .layer_shell_state
-                        .layer_surfaces()
-                        .find(|s| s.wl_surface() == surface)
-                        .and_then(|s| s.current_state().size)?;
-                    Some(serde_json::json!({
-                        "namespace": record.namespace,
-                        "rect": [x, y, size.w, size.h],
-                    }))
-                })
-                .collect::<Vec<_>>(),
+            "tile_preview": tile_preview,
+            "layers": layers,
         });
         // Overdraw per output for the last drawn frame (#503).
         doc["frame_cost"] = self
@@ -1727,17 +1762,24 @@ impl Runtime {
         let size = self.state.primary_size();
         let output = Rectangle::new((0, 0).into(), size);
         let model = self.manager.model();
+        let windows = self.manager.overview_windows();
+        // A fixed workspace count shows exactly that many; dynamic
+        // workspaces gain GNOME's trailing empty one.
+        let shown = match model.fixed_workspaces() {
+            Some(_) => model.workspaces().to_vec(),
+            None => crate::overview::shown_workspaces(model.workspaces(), &windows),
+        };
         let layout = if self.overview_app_grid {
-            crate::overview::app_grid_layout
+            crate::overview::app_grid_layout_shown
         } else {
-            crate::overview::layout
+            crate::overview::layout_shown
         };
         layout(
             output,
             crate::windows::WORK_AREA_TOP,
-            model.workspaces(),
+            &shown,
             model.active_workspace(),
-            &self.manager.overview_windows(),
+            &windows,
         )
     }
 
@@ -2036,7 +2078,9 @@ impl Runtime {
                         let model = self.manager.model();
                         let active = model.active_workspace();
                         let workspaces = model.workspaces().to_vec();
+                        let fixed = model.fixed_workspaces();
                         let slide = self.manager.workspace_slide_mut();
+                        slide.set_limit(fixed);
                         slide.begin_swipe(active, &workspaces, width, policy, now);
                         slide.update_swipe(travel.x, time);
                     }
@@ -2976,6 +3020,8 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // Focus-follows-mouse timers (pointer rest, auto-raise).
+        self.manager.tick_hover(&mut self.state);
         #[cfg(feature = "xwayland")]
         // DISPLAY may be a reserved idle listener. An icon helper must not
         // connect and accidentally activate XWayland before a real client.
@@ -3038,6 +3084,12 @@ impl Runtime {
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
         }
+        if let Some(settings) = outcome.wm_settings {
+            self.manager.apply_wm_settings(&mut self.state, settings);
+        }
+        for _ in 0..outcome.show_desktop_toggles {
+            self.manager.toggle_show_desktop(&mut self.state);
+        }
         if let Some(enabled) = outcome.screen_reader {
             #[cfg(feature = "drm")]
             let hardware = matches!(self.backend, Backend::Drm(_));
@@ -3079,7 +3131,7 @@ impl Runtime {
                     above: self.manager.is_above(window),
                     sticky: self.manager.is_sticky(window),
                     workspace_left: self.manager.workspace_left_of(window),
-                    workspace_right: true,
+                    workspace_right: self.manager.workspace_right_of(window),
                 });
         }
         if !self.control.overview_open() {
