@@ -4201,7 +4201,7 @@ sleep 1
 xdotool key XF86MonBrightnessUp
 sleep 0.5
 sed -n "${transient_reduced_start},\$p" "$LOG" > "$ARTIFACTS/transient-reduced.log"
-grep -q "roost-shell-gtk: transient osd settled after [0-9]* ms of 100 ms" "$ARTIFACTS/transient-reduced.log" ||
+grep -q "tuna-shell-gtk: transient osd settled after [0-9]* ms of 100 ms" "$ARTIFACTS/transient-reduced.log" ||
     fail G-TRANSIENT-OFF "Reduced Motion dropped the OSD's fade"
 gsettings reset org.gnome.desktop.a11y.interface reduced-motion
 sleep 1
