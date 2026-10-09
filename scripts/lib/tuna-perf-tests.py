@@ -709,6 +709,18 @@ class Accounting(unittest.TestCase):
             self.assertEqual(result["processes"][0]["cpu_ticks"], 50)
             self.assertEqual(result["processes"][0]["start_ticks"], 88)
 
+    def test_samples_name_each_process_without_its_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.process(root, 1, 0, 1000, 10, 55)
+            (path / "cmdline").write_bytes(b"/usr/bin/tuna-compositor\0--secret-argument\0")
+            self.process(root, 2, 0, 1000, 10, 56)
+            rows = {row["pid"]: row for row in guest.sample(1000, root)["processes"]}
+            self.assertEqual(rows[1]["cmd"], "tuna-compositor")
+            self.assertEqual(rows[1]["comm"], "command ) with ")
+            self.assertIsNone(rows[2]["cmd"])  # Kernel threads have no argv.
+            self.assertNotIn("secret", json.dumps(rows))
+
     def test_memory_read_failure_is_reported_instead_of_understating_pss(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
