@@ -24,6 +24,8 @@ These own imported GPU textures and buffer references; their drawing method
 reads the texture, not the `wl_surface`. The compositor copies those retained
 elements into an offscreen texture only after the mapped window disappears.
 The closing texture therefore survives a destroyed surface or exited client.
+Its bounds cover committed xdg geometry; shadow/popup pixels outside those
+bounds remain a qualification limitation.
 The window leaves the focus/model immediately; a visual ghost cannot receive
 input. Closing dialogs vanish when their parent is removed. Hidden windows
 are not copied, and switching workspaces does not replay a map effect.
@@ -40,9 +42,15 @@ qualification limitations, not passing parity cases.
 
 ```sh
 cargo test -p tuna-compositor --lib --no-default-features window_lifecycle
-cargo build -p tuna-compositor -p tuna-shell-gtk
+flock /tmp/tuna-v1-build-and-freeze.lock sh -c '
+  set -eu
+  cargo build -p tuna-compositor -p tuna-shell-gtk
+  mkdir -p /tmp/tuna-window-binaries
+  cp "${CARGO_TARGET_DIR:-target}/debug/tuna-compositor" \
+     "${CARGO_TARGET_DIR:-target}/debug/tuna-shell-gtk" /tmp/tuna-window-binaries/
+'
 dbus-run-session -- scripts/tuna-window-lifecycle-proof \
-  --bin-dir target/debug --display :95 --artifacts /tmp/tuna-window-lifecycle
+  --bin-dir /tmp/tuna-window-binaries --display :95 --artifacts /tmp/tuna-window-lifecycle
 ```
 
 The runtime proof owns a private X server, settings and 0700 runtime directory.
@@ -56,7 +64,10 @@ and absence of stale pixels at completion. It also checks reduced-motion
 normal-window transforms and immediate map/destroy with animations off.
 The proof copies the supplied binaries into its artifact directory and records
 SHA-256 hashes, source revision, dirty status and renderer in `manifest.json`.
-Build both binaries from the same checkout before running it.
+Build both binaries from the same checkout before running it. All parallel
+native builders must use the same build-and-freeze lock: Cargo releases its
+lock before a caller copies the binaries. Compare the recorded hashes against the owned
+build bundle before treating the run as qualification.
 JSON snapshots and PNGs accompany
 `assertions.txt`. `window_lifecycle` in the instrumented compositor state
 records running effects, opening transforms and recent outcomes.
