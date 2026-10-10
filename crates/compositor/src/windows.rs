@@ -324,6 +324,13 @@ impl WindowManager {
         self.pointer_pos
     }
 
+    /// Whether the seat's Num Lock is on (Mouse Keys stand aside).
+    pub fn num_lock(&self) -> bool {
+        self.keyboard
+            .as_ref()
+            .is_some_and(|keyboard| keyboard.modifier_state().num_lock)
+    }
+
     /// Empty manager; attaches keyboard and pointer capabilities to the
     /// state's seat and keeps their handles for input routing.
     pub fn new(state: &mut State) -> Self {
@@ -3579,7 +3586,7 @@ fn contains(geometry: Rectangle<i32, Logical>, pos: Point<f64, Logical>) -> bool
 }
 
 /// Backend input event kinds this manager consumes from the runtime.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ManagerInput {
     Key {
         keycode: u32,
