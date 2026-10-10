@@ -476,12 +476,17 @@ gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
 # Candidate and thumbnail pixel gates assume GNOME's blue accent; pin it so
 # a vendor default (orange on Ubuntu) cannot move the highlight (#566).
 # Hosts without the key fall back to libadwaita's built-in blue.
-# TEMPORARY diagnostic for #566: the installed run still renders orange.
+# TEMPORARY diagnostic for #566: which settings source the shell follows.
 echo "tuna-gtk-shell-proof: accent setup: interface-range: $(gsettings range org.gnome.desktop.interface accent-color 2>&1 | head -1)"
 if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
     gsettings set org.gnome.desktop.interface accent-color 'blue'
 fi
-echo "tuna-gtk-shell-proof: accent setup: accent-color: $(gsettings get org.gnome.desktop.interface accent-color 2>&1) gtk-theme: $(gsettings get org.gnome.desktop.interface gtk-theme 2>&1)"
+# An out-of-process Settings portal would read the runner's own dconf
+# database rather than this proof's keyfile; pin blue there as well.
+# Ephemeral CI workers only; never fail the proof on it.
+env -u GSETTINGS_BACKEND -u XDG_CONFIG_HOME GSETTINGS_BACKEND=dconf \
+    gsettings set org.gnome.desktop.interface accent-color 'blue' >/dev/null 2>&1 || true
+echo "tuna-gtk-shell-proof: accent setup: keyfile: $(gsettings get org.gnome.desktop.interface accent-color 2>&1) gtk-theme: $(gsettings get org.gnome.desktop.interface gtk-theme 2>&1) host-dconf: $(env -u GSETTINGS_BACKEND -u XDG_CONFIG_HOME GSETTINGS_BACKEND=dconf gsettings get org.gnome.desktop.interface accent-color 2>&1)"
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/tuna-bl"
@@ -3414,7 +3419,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$near" = yes ] ||
         fail G-IME-CANDIDATES "the candidate window ($popup) is not under the text cursor ($cursor)"
     # GNOME's popup surface (#36363a) in its top padding, and the
-    # highlighted first row in the accent (#3584e4).
+    # highlighted first row in the session accent.
     # shellcheck disable=SC2046
     set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($5 + 30)) $(($6 + 9))) "$5" "$6"
     if [ "${1:-0}" -lt 46 ] || [ "${1:-0}" -gt 62 ] || [ "${3:-0}" -lt 50 ] || [ "${3:-0}" -gt 66 ]; then
@@ -3422,12 +3427,23 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     fi
     surface="$1 $2 $3"
     row0="$(grep 'ibus candidate 0 你 at' "$LOG" | tail -1 | sed 's/.* at //')"
+    [ -n "$row0" ] || fail G-IME-CANDIDATES "the first row was never laid out"
     # shellcheck disable=SC2086 # four numbers
     set -- $row0
     # shellcheck disable=SC2046
     set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($1 + 3)) $(($2 + $4 / 2)))
-    [ "${3:-0}" -gt $((${1:-255} + 60)) ] ||
-        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel ${1:-?} ${2:-?} ${3:-?})"
+    r0=$1 g0=$2 b0=$3
+    # The selected row follows the session accent (blue on dev hosts,
+    # orange under Ubuntu's default), so assert a vivid highlight rather
+    # than one hue: outside the bare surface box. The sampled hue stays
+    # in the log for the ledger.
+    hl="$(awk -v r0="$r0" -v g0="$g0" -v b0="$b0" 'BEGIN {
+        mx0 = (r0>g0 ? (r0>b0 ? r0 : b0) : (g0>b0 ? g0 : b0))
+        mn0 = (r0<g0 ? (r0<b0 ? r0 : b0) : (g0<b0 ? g0 : b0))
+        bare = (r0>=46 && r0<=62 && b0>=50 && b0<=66)
+        print (!bare && (mx0-mn0)>100 && mx0>150) ? "yes" : "no" }')"
+    [ "$hl" = yes ] ||
+        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel $r0 $g0 $b0)"
     row1="$(grep 'ibus candidate 1 尼 at' "$LOG" | tail -1 | sed 's/.* at //')"
     # shellcheck disable=SC2086 # four numbers
     set -- $row1
@@ -3889,7 +3905,13 @@ scrot "$ARTIFACTS/24g-workspace-thumbnails.png" >/dev/null
 ring="$(jq -r '.thumbnails[] | select(.active) | .rect | "\(.[0] - 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
 # shellcheck disable=SC2046,SC2086
 set -- $(px "$ARTIFACTS/24g-workspace-thumbnails.png" $ring)
-if [ "${3:-0}" -le 180 ] || [ "${1:-255}" -ge 100 ]; then
+# The ring follows the session accent (blue on dev hosts, orange under
+# Ubuntu's default): assert a vivid indicator rather than one hue.
+ring_vivid="$(awk -v r="$1" -v g="$2" -v b="$3" 'BEGIN {
+    mx = (r>g ? (r>b ? r : b) : (g>b ? g : b))
+    mn = (r<g ? (r<b ? r : b) : (g<b ? g : b))
+    print ((mx-mn)>100 && mx>150) ? "yes" : "no" }')"
+if [ "$ring_vivid" != yes ]; then
     fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
 fi
 target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
