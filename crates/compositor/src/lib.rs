@@ -52,6 +52,7 @@ pub mod capture_security;
 mod constraint_motion;
 pub mod control;
 pub mod corner_pressure;
+pub mod cursor;
 #[cfg(feature = "drm")]
 pub mod drm;
 pub mod frame_timing;
@@ -142,6 +143,9 @@ pub struct State {
     /// The icon a client's drag-and-drop carries, drawn at the pointer
     /// until the drop.
     dnd_icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+    /// What the client under the pointer asked the cursor to be: a
+    /// `wp_cursor_shape_v1` shape, its own surface, or hidden (#342).
+    pub(crate) cursor_image: smithay::input::pointer::CursorImageStatus,
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
@@ -668,6 +672,16 @@ impl SeatHandler for State {
             self.reactivate_inhibitor(surface);
         }
     }
+
+    /// A client set the cursor (wl_pointer.set_cursor or a
+    /// `wp_cursor_shape_v1` shape); drawn by `cursor.rs` (#342).
+    fn cursor_image(
+        &mut self,
+        _seat: &Seat<Self>,
+        image: smithay::input::pointer::CursorImageStatus,
+    ) {
+        self.cursor_image = image;
+    }
 }
 
 /// Wayland seat name shared by the protocol state, the token store's
@@ -751,6 +765,14 @@ impl State {
     }
 
     /// Number of physically held keys, without exposing their identities.
+    /// Whether a client surface holds pointer focus: only then does its
+    /// cursor request apply; elsewhere the compositor shows its arrow.
+    pub fn pointer_focused(&self) -> bool {
+        self.seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.current_focus().is_some())
+    }
+
     pub fn pressed_key_count(&self) -> usize {
         self.seat
             .get_keyboard()
@@ -835,6 +857,7 @@ impl State {
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             data_device_state: DataDeviceState::new::<State>(dh),
             dnd_icon: None,
+            cursor_image: smithay::input::pointer::CursorImageStatus::default_named(),
             primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
             dead_layer_surfaces: std::collections::HashSet::new(),

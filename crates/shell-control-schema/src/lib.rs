@@ -158,9 +158,12 @@ impl ProtocolVersion {
     /// `0.28` replaces `InputSettings::enable_animations` with `motion`,
     /// GNOME's three-state motion policy plus its slow-down factor.
     /// The positional postcard body changes, so both peers ship together.
+    ///
+    /// `0.29` appends GNOME's cursor theme, cursor size and locate-pointer
+    /// to `InputSettings` (#342). Positional again: both peers upgrade.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 28,
+        minor: 29,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -775,6 +778,17 @@ pub struct InputSettings {
     /// GTK shell default text direction; corners and Activities follow it.
     #[serde(default)]
     pub right_to_left: bool,
+    /// `org.gnome.desktop.interface cursor-theme`: the Xcursor theme the
+    /// compositor draws its own and requested-shape cursors from.
+    #[serde(default)]
+    pub cursor_theme: String,
+    /// `org.gnome.desktop.interface cursor-size`, in logical pixels.
+    #[serde(default)]
+    pub cursor_size: u32,
+    /// `org.gnome.desktop.interface locate-pointer`: a lone Ctrl tap
+    /// shows ripples around the pointer.
+    #[serde(default)]
+    pub locate_pointer: bool,
 }
 
 impl Default for InputSettings {
@@ -798,6 +812,9 @@ impl Default for InputSettings {
             mouse_left_handed: false,
             touchpad_left_handed: false,
             right_to_left: false,
+            cursor_theme: "Adwaita".into(),
+            cursor_size: 24,
+            locate_pointer: false,
         }
     }
 }
@@ -1139,6 +1156,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
             check_title(&settings.xkb_layout)?;
             check_title(&settings.xkb_variant)?;
             check_title(&settings.xkb_options)?;
+            check_title(&settings.cursor_theme)?;
         }
         Message::Command {
             kind: CommandKind::SetSwitcherThumbnails { thumbnails },
@@ -1234,8 +1252,39 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_28() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
+    fn current_version_is_0_29() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 29));
+    }
+
+    #[test]
+    fn cursor_settings_survive_the_positional_control_wire() {
+        for (theme, size, locate_pointer) in [("Adwaita", 24, false), ("DMZ-White", 48, true)] {
+            roundtrip(&Message::Command {
+                id: 1,
+                kind: CommandKind::SetInputSettings(InputSettings {
+                    cursor_theme: theme.into(),
+                    cursor_size: size,
+                    locate_pointer,
+                    right_to_left: true,
+                    ..InputSettings::default()
+                }),
+            });
+        }
+    }
+
+    #[test]
+    fn oversized_cursor_theme_names_are_rejected() {
+        let frame = encode_frame(&Message::Command {
+            id: 1,
+            kind: CommandKind::SetInputSettings(InputSettings {
+                cursor_theme: "x".repeat(MAX_TITLE_LEN + 1),
+                ..InputSettings::default()
+            }),
+        });
+        assert!(matches!(
+            decode_frame(&frame),
+            Err(DecodeError::TitleTooLong { .. })
+        ));
     }
 
     #[test]
@@ -1335,7 +1384,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 30).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

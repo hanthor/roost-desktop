@@ -1942,6 +1942,11 @@ fn build(app: &adw::Application) {
                 );
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
+                    // GNOME's cursor and locate-pointer keys (#342): the
+                    // compositor draws its own cursors from them.
+                    out.cursor_theme = iface.string("cursor-theme").to_string();
+                    out.cursor_size = iface.int("cursor-size").clamp(0, 256) as u32;
+                    out.locate_pointer = iface.boolean("locate-pointer");
                 }
                 out.right_to_left = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
                 out.motion = motion::from_settings(all[4].as_ref(), all[5].as_ref());

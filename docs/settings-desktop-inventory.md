@@ -205,8 +205,8 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | cursor-blink | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | cursor-blink-time | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | cursor-blink-timeout | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
-| cursor-size | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
-| cursor-theme | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
+| cursor-size | Honored | Live compositor-drawn cursor (theme images loaded at the size times the ceiled output scale) and GTK clients; proof G-CURSOR-SIZE |
+| cursor-theme | Honored | Live compositor Xcursor lookup (XCURSOR_PATH or XDG icon dirs, `Inherits=` chain, then `default`) for its own and `wp_cursor_shape_v1` cursors, and GTK clients; proofs G-CURSOR-SIZE, G-CURSOR-SHAPE. SVG (scalable) cursor themes are not read (#342) |
 | document-font-name | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |
 | enable-animations | Honored | Live idle shield fade duration, GTK transitions and compositor overview/strip motion; proofs G-ANIMATIONS-OFF and G-INTROSPECT-MOTION verify effective motion through actual GNOME clients |
 | enable-hot-corners | Honored (partial) | Live enable/disable and output-aware LTR corner regions; candidate fullscreen guard has protocol/GTK proofs awaiting execution. Pressure barriers, RTL, retrigger/toggle policy and physical multi-output qualification remain in #336 |
@@ -226,7 +226,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | gtk-timeout-initial | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |
 | gtk-timeout-repeat | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |
 | icon-theme | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |
-| locate-pointer | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |
+| locate-pointer | Honored | A lone Control_L tap draws GNOME's three ripples at the pointer, live; `org.gnome.mutter locate-pointer-key` is not read (Control_L fixed); proof G-LOCATE-POINTER |
 | menubar-accel | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |
 | menubar-detachable | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |
 | menus-have-tearoff | Ignored | No Tuna Desktop consumer or verified toolkit translation for this preference |

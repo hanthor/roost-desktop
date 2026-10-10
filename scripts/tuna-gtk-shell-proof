@@ -72,6 +72,14 @@
 #   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
 #                  switches), repeat-interval the repeat rate, and
 #                  enable-hot-corners the hot corner (#60)
+#   G-CURSOR-SIZE  GNOME's cursor-theme and cursor-size change the
+#                  compositor-drawn cursor live: an inherited Xcursor
+#                  theme's image at 24px, then 48px (#342)
+#   G-CURSOR-SHAPE wp_cursor_shape_v1 requests draw that theme's shape
+#                  (a missing one falls back to Adwaita or the arrow); a client
+#                  cursor surface draws at its own size
+#   G-LOCATE-POINTER with locate-pointer on, a lone Ctrl tap draws GNOME's
+#                  ripples at the pointer; off, it draws nothing
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
 #   G-SCREENSHOT   org.gnome.Shell.Screenshot saves the screen as a PNG
@@ -214,6 +222,9 @@ fi
 XDG_STATE_HOME="$ARTIFACTS/state"
 XDG_DATA_HOME="$ARTIFACTS/data"
 export XDG_STATE_HOME XDG_DATA_HOME
+# Cursor themes (#342): the proof's own first, then the system's.
+XCURSOR_PATH="$XDG_DATA_HOME/icons:$HOME/.icons:/usr/share/icons:/usr/share/pixmaps"
+export XCURSOR_PATH
 # The dash shows only the proof's own windows: pin a favourite no
 # runner has, so the host's apps (GitHub's runners now ship Firefox,
 # which GNOME's default favourites name) never reach the a11y goldens.
@@ -300,6 +311,7 @@ INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 HOT_CORNER_PID=""
 OCCLUSION_PIDS=""
+CURSOR_PID=""
 IME_PIDS=""
 cleanup() {
     if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
@@ -308,6 +320,7 @@ cleanup() {
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
+    if [ -n "$CURSOR_PID" ]; then kill "$CURSOR_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$OCCLUSION_PIDS" ]; then kill $OCCLUSION_PIDS 2>/dev/null || true; fi
     # shellcheck disable=SC2086
@@ -2322,6 +2335,8 @@ WAYLAND_DISPLAY="$SOCKET_NAME" GSK_RENDERER=gl "$PY" "$ROOT/scripts/lib/tuna-tes
     Delta "#c01c28" >"$ARTIFACTS/window-Delta.log" 2>&1 &
 cstate '.windows | any(.app_id == "tuna-test-delta")' "gl window" ||
     fail G-GL-WINDOW "a GL-rendered GTK window never mapped"
+# The compositor draws the pointer (#342): park it off the probed body.
+xdotool mousemove --window "$WID" $((WIDTH - 2)) $((HEIGHT - 2))
 sleep 2
 scrot "$ARTIFACTS/19-gl-window.png" >/dev/null
 centre="$(jq -r '.windows[] | select(.app_id == "tuna-test-delta") | .rect | "\(.[0] + .[2] / 2) \(.[1] + .[3] / 3)"' "$CSTATE")"
@@ -2581,6 +2596,121 @@ xdotool key Escape
 cstate '.overview_open | not' "hot corner dismissed" ||
     fail G-HOT-CORNER "the corner-opened overview did not close"
 pass G-HOT-CORNER "live GNOME disable rejects the corner; enable opens the actual overview"
+
+# GNOME's cursor theme, size and shapes are the compositor's to draw
+# (#342). A proof theme inherits its cursors from a base theme, with
+# 24px and 48px images, so the drawn buffer shows which size applied.
+"$ROOT/scripts/tuna-cursor-client-build" "$ARTIFACTS/cursor-client" >"$ARTIFACTS/cursor-client-build.log" 2>&1 ||
+    fail G-CURSOR-SIZE "the cursor probe did not build: $(tail -3 "$ARTIFACTS/cursor-client-build.log")"
+"$PY" - "$XDG_DATA_HOME/icons" <<'PYEOF'
+import os
+import struct
+import sys
+
+def xcursor(sizes):
+    header = struct.pack("<4sIII", b"Xcur", 16, 0x10000, len(sizes))
+    toc, chunks, at = b"", b"", 16 + 12 * len(sizes)
+    for side in sizes:
+        toc += struct.pack("<III", 0xFFFD0002, side, at)
+        chunk = struct.pack("<IIIIIIIII", 36, 0xFFFD0002, side, 1, side, side, 1, 1, 0)
+        chunk += struct.pack("<I", 0xFF202020) * (side * side)
+        chunks += chunk
+        at += len(chunk)
+    return header + toc + chunks
+
+root = sys.argv[1]
+os.makedirs(os.path.join(root, "TunaProof"), exist_ok=True)
+with open(os.path.join(root, "TunaProof", "index.theme"), "w") as f:
+    f.write("[Icon Theme]\nName=TunaProof\nInherits=TunaProofBase\n")
+os.makedirs(os.path.join(root, "TunaProofBase", "cursors"), exist_ok=True)
+for name in ("default", "crosshair"):
+    with open(os.path.join(root, "TunaProofBase", "cursors", name), "wb") as f:
+        f.write(xcursor([24, 48]))
+PYEOF
+cursor_theme_before="$(gsettings get org.gnome.desktop.interface cursor-theme)"
+cursor_size_before="$(gsettings get org.gnome.desktop.interface cursor-size)"
+cursor_windows="$(jq '.windows | length' "$CSTATE")"
+# cursor_probe MODE ARG: map the probe window and put the pointer on it.
+cursor_probe() {
+    [ -z "$CURSOR_PID" ] || { kill "$CURSOR_PID" 2>/dev/null || true; wait "$CURSOR_PID" 2>/dev/null || true; }
+    cstate ".windows | length == $cursor_windows" "cursor probe gone" ||
+        fail "$3" "the previous cursor probe did not close"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) 16
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$ARTIFACTS/cursor-client/tuna-cursor-client" "$1" "$2" \
+        >"$ARTIFACTS/cursor-probe-$1-$2.log" 2>&1 &
+    CURSOR_PID=$!
+    cstate 'any(.windows[]; .app_id == "tuna-cursor-probe")' "cursor probe mapped" ||
+        fail "$3" "the cursor probe ($1 $2) did not map"
+    probe_rect="$(jq -r '.windows[] | select(.app_id == "tuna-cursor-probe") | .rect | "\((.[0] + .[2] / 2) | floor) \((.[1] + .[3] / 2) | floor)"' "$CSTATE")"
+    # shellcheck disable=SC2086 # two coordinates
+    xdotool mousemove --window "$WID" $probe_rect
+    for _ in $(seq 1 20); do
+        grep -q enter "$ARTIFACTS/cursor-probe-$1-$2.log" && return 0
+        xdotool mousemove_relative 1 0
+        sleep 0.25
+    done
+    fail "$3" "the pointer never entered the cursor probe ($1 $2)"
+}
+cursor_probe shape default G-CURSOR-SIZE
+gsettings set org.gnome.desktop.interface cursor-theme 'TunaProof'
+gsettings set org.gnome.desktop.interface cursor-size 24
+cstate '.cursor.theme == "TunaProof" and .cursor.size == 24 and .cursor.kind == "named" and .cursor.name == "default" and .cursor.source == "client" and .cursor.image_theme == "TunaProofBase" and .cursor.image == [24, 24] and .cursor.logical == [24, 24]' "theme cursor at 24px" ||
+    fail G-CURSOR-SIZE "cursor-theme TunaProof at size 24 did not draw the inherited 24px image"
+cp "$CSTATE" "$ARTIFACTS/cursor-size-24.json"
+gsettings set org.gnome.desktop.interface cursor-size 48
+cstate '.cursor.size == 48 and .cursor.image_theme == "TunaProofBase" and .cursor.image == [48, 48] and .cursor.logical == [48, 48]' "theme cursor at 48px" ||
+    fail G-CURSOR-SIZE "cursor-size 48 did not redraw the cursor from the 48px image live"
+cp "$CSTATE" "$ARTIFACTS/cursor-size-48.json"
+pass G-CURSOR-SIZE "live cursor-theme (inherited) and cursor-size: 24px then 48px images drawn at 24 and 48 logical px"
+
+gsettings set org.gnome.desktop.interface cursor-size 24
+cursor_probe shape crosshair G-CURSOR-SHAPE
+cstate '.cursor.kind == "named" and .cursor.name == "crosshair" and .cursor.source == "client" and .cursor.file == "crosshair" and .cursor.image_theme == "TunaProofBase" and .cursor.image == [24, 24]' "crosshair shape" ||
+    fail G-CURSOR-SHAPE "a wp_cursor_shape_v1 crosshair request did not draw the theme's crosshair"
+cp "$CSTATE" "$ARTIFACTS/cursor-shape-crosshair.json"
+# A shape the theme chain lacks still shows: from libXcursor's default
+# and GNOME's Adwaita fallbacks when installed, else the theme's arrow.
+cursor_probe shape wait G-CURSOR-SHAPE
+cstate '.cursor.kind == "named" and .cursor.name == "wait" and (.cursor.file == "default" or (.cursor.image_theme | IN("default", "Adwaita", "hicolor")))' "missing shape" ||
+    fail G-CURSOR-SHAPE "a shape missing from the theme did not fall back"
+cursor_probe surface 32 G-CURSOR-SHAPE
+cstate '.cursor.kind == "surface" and .cursor.image == [32, 32] and .cursor.logical == [32, 32]' "client cursor surface" ||
+    fail G-CURSOR-SHAPE "a client's 32px cursor surface was not drawn at its size"
+cp "$CSTATE" "$ARTIFACTS/cursor-surface.json"
+kill "$CURSOR_PID" 2>/dev/null || true
+wait "$CURSOR_PID" 2>/dev/null || true
+CURSOR_PID=""
+cstate ".windows | length == $cursor_windows" "cursor probe closed" ||
+    fail G-CURSOR-SHAPE "the cursor probe did not close"
+gsettings set org.gnome.desktop.interface cursor-theme "$cursor_theme_before"
+gsettings set org.gnome.desktop.interface cursor-size "$cursor_size_before"
+pass G-CURSOR-SHAPE "cursor-shape crosshair drawn from the theme, a missing shape falls back, a 32px client surface draws at 32px"
+
+# GNOME's locate-pointer: a lone Ctrl tap ripples at the pointer, only
+# while the key is on (Mutter's locate-pointer-key, Control_L).
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+gsettings set org.gnome.desktop.interface locate-pointer false
+cstate '.cursor.locate_pointer.enabled | not' "locate-pointer off" ||
+    fail G-LOCATE-POINTER "locate-pointer false did not reach the compositor"
+locate_before="$(jq '.cursor.locate_pointer.count' "$CSTATE")"
+locate_frames="$(jq '.cursor.locate_pointer.frames' "$CSTATE")"
+xdotool key Control_L
+sleep 1.5
+jq -e ".cursor.locate_pointer.count == $locate_before and .cursor.locate_pointer.frames == $locate_frames" "$CSTATE" >/dev/null ||
+    fail G-LOCATE-POINTER "a Ctrl tap rippled with locate-pointer off"
+gsettings set org.gnome.desktop.interface locate-pointer true
+cstate '.cursor.locate_pointer.enabled' "locate-pointer on" ||
+    fail G-LOCATE-POINTER "locate-pointer true did not reach the compositor"
+xdotool key Control_L
+cstate ".cursor.locate_pointer.count == $((locate_before + 1)) and .cursor.locate_pointer.active and .cursor.locate_pointer.frames > $locate_frames" "ripples" 3 ||
+    fail G-LOCATE-POINTER "a Ctrl tap with locate-pointer on drew no ripples"
+cp "$CSTATE" "$ARTIFACTS/locate-pointer.json"
+jq -e ".cursor.locate_pointer.at == [$((WIDTH / 2)), $((HEIGHT / 2))]" "$CSTATE" >/dev/null ||
+    fail G-LOCATE-POINTER "the ripples did not center on the pointer: $(jq -c '.cursor.locate_pointer' "$CSTATE")"
+cstate '.cursor.locate_pointer.active | not' "ripples finished" 5 ||
+    fail G-LOCATE-POINTER "the ripples did not finish"
+gsettings set org.gnome.desktop.interface locate-pointer false
+pass G-LOCATE-POINTER "a Ctrl tap ripples at the pointer with locate-pointer on, nothing with it off"
 
 # A genuine GTK fullscreen request blocks accidental corner opening, while
 # deliberate Super access remains available and unfullscreen restores it.
