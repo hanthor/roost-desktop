@@ -292,9 +292,24 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                 return actual
             time.sleep(0.2)
         raise RuntimeError("GNOME Screen Reader preference did not control genuine distribution Orca")
+    def await_reaped(identity):
+        # The bus name is released while the stopped instance is still
+        # exiting; starting the next Orca first loses the restart name race
+        # on cold VMs (#543). Wait for the old process itself to die.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            departed = agent.run("orca-departed", *identity)
+            if not departed["original_alive"]:
+                return
+            time.sleep(0.2)
+        raise RuntimeError("stopped Orca instance did not exit before restart")
     try:
         first_orca = None
+        stopped_identity = None
         for enabled in (False, True, False, True, False):
+            if enabled and stopped_identity is not None:
+                await_reaped(stopped_identity)
+                stopped_identity = None
             agent.run("orca-on" if enabled else "orca-off")
             actual = await_orca(enabled)
             if enabled:
@@ -302,6 +317,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                 if first_orca == identity:
                     raise RuntimeError("Orca retained the stopped process identity")
                 first_orca = identity
+                stopped_identity = identity
         record("V-ORCA-ACTIVATION", True,
                "live GNOME key starts/stops genuine distribution Orca; bus PID/UID, package hash, compositor parent and display verified")
     finally:
