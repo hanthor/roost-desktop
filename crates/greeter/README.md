@@ -12,21 +12,22 @@ in the crate; it follows whatever conversation greetd drives.
 
 ## Public API (`src/lib.rs`)
 
-- `model`: `GreeterModel`, the prompt state machine that turns greetd's
-  auth conversation into UI state.
+- `model`: `GreeterModel`, the prompt state machine (re-exported from
+  `tuna-greeter-control`).
 - `session`: parse installed `.desktop` session files
   (`enumerate_system`).
-- `client`: blocking greetd conversation driver over a Unix socket.
+- `client`: blocking greetd conversation driver over a Unix socket
+  (re-exported from `tuna-greeter-control`).
 - `ui`: the login window (feature `gtk-ui`).
 
-Feature `gtk-ui` (default) pulls in GTK4 and libadwaita. Consumers that
-need only the model and client build with `default-features = false` and
-need no GTK system libraries.
+Feature `gtk-ui` (default) pulls in GTK4 and libadwaita. `tuna-greeter-control`
+holds the headless prompt state machine and IPC client with no GTK dependencies.
 
 ## Dependents
 
-`tuna-compositor` uses `model` and `client` for its greetd unlock path,
-with `gtk-ui` off. Tests in `tests/` drive a fake greetd.
+`tuna-greeter` provides the login window and binary; `tuna-compositor`
+depends on `tuna-greeter-control` directly for its unlock path. Tests in
+`tests/` drive a fake greetd.
 
 ## Docs
 

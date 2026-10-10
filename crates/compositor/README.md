@@ -29,9 +29,9 @@ Features: `drm` and `xwayland`, both on by default.
 
 ## Depends on / dependents
 
-Uses `tuna-shell-control`, `tuna-greeter` (prompt model and greetd client
-only, without `gtk-ui`), and `tuna-wallpaper`. `tuna-shell-host` uses it
-as a dev-dependency for its live tests. Integration tests are in `tests/`.
+Uses `tuna-shell-control`, `tuna-greeter-control` (prompt model and greetd
+client), and `tuna-wallpaper`. `tuna-shell-host` uses it as a dev-dependency
+for its live tests. Integration tests are in `tests/`.
 
 ## Docs
 

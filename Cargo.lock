@@ -4162,7 +4162,7 @@ dependencies = [
  "signal-hook",
  "smithay",
  "tempfile",
- "tuna-greeter",
+ "tuna-greeter-control",
  "tuna-shell-control",
  "tuna-wallpaper",
  "wayland-client",
@@ -4182,6 +4182,14 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "tempfile",
+ "tuna-greeter-control",
+]
+
+[[package]]
+name = "tuna-greeter-control"
+version = "0.1.0"
+dependencies = [
+ "greetd_ipc",
 ]
 
 [[package]]
