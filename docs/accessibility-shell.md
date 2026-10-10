@@ -1,0 +1,13 @@
+# GTK accessibility preferences
+
+The GTK shell consumes `org.gnome.desktop.a11y always-show-universal-access-status` live. Its accessibility indicator appears when requested or when any menu feature is enabled, matching [GNOME Shell 51's indicator](https://github.com/GNOME/gnome-shell/blob/51.0/js/ui/status/accessibility.js). The ten rows follow the reference order: High Contrast, Zoom, Large Text, Screen Reader, Screen Keyboard, Visual Alerts, Sticky Keys, Slow Keys, Bounce Keys, Mouse Keys. Boolean rows bind their GNOME settings bidirectionally; Large Text uses factor 1.25 when enabled and resets the schema default when disabled. Accessibility Settings launches `gnome-control-center universal-access`.
+
+This implements menu settings and visibility. It does not implement missing magnification, on-screen keyboard, AccessX, or compositor visual alerts. Those remain separately recorded capability gaps; a toggle state alone proves no functional assistive feature. Screen Reader remains subject to the hardware-session consumer and genuine Orca qualification.
+
+`org.gnome.desktop.a11y.interface keyboard-focus-visible-timeout` controls focus indication in shell GTK windows. Positive values are seconds, zero keeps keyboard focus visible, and negative uses the toolkit default. [GTK 4.23.3's window implementation](https://github.com/GNOME/gtk/blob/4.23.3/gtk/gtkwindow.c) supports the corresponding toolkit property. When that property is absent, a weak-window policy refreshes the old fixed timeout until the requested duration expires, preserves pointer-driven clearing, and observes newly created windows. The old [GTK 4.14.5 default](https://github.com/GNOME/gtk/blob/4.14.5/gtk/gtkwindow.c) is three seconds. Missing schemas/keys remain safe on older hosts. The shell policy does not change external applications' toolkit settings.
+
+## Focused proof
+
+`scripts/tuna-gtk-accessibility-proof GTK_TEST_EXECUTABLE SOURCE_COMMIT ARTIFACT_DIRECTORY` runs the ignored `accessibility::tests::live_menu_and_focus_settings` test using actual GTK widgets, settings callbacks, and timers. Each run owns a mode 0700 runtime directory, private session and accessibility buses, a free Xvfb display, and memory settings, and records binary/source identity plus GTK version. The dedicated focus schema fixture allows older hosts to exercise the new key without changing installed schemas or the user's settings.
+
+Scope: source GTK widget behavior on the recorded host. Installed Wayland shell pixels, actual keyboard/pointer input, external toolkit clients, native output sessions, and paired GNOME behavior still need qualification. Pure policy tests and this focused source proof alone do not close P-A11Y-05.
