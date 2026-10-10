@@ -86,7 +86,7 @@ pub fn menu() -> gtk::MenuButton {
     column.insert_child_after(&large, Some(&items[1]));
     if let Some(settings) = crate::settings(crate::INTERFACE_SCHEMA) {
         large.set_active(settings.double("text-scaling-factor") > 1.0);
-        large.set_sensitive(settings.is_writable("text-scaling-factor"));
+        settings.bind_writable("text-scaling-factor", &large, "sensitive", false);
         let updating = Rc::new(Cell::new(false));
         let changed = large.downgrade();
         let sync = updating.clone();
