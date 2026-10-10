@@ -5,12 +5,13 @@ set -eu
 mode="$1"; root="$2"; socket="$3"
 case "$mode" in
     1)
-        [ -z "${TUNA_SHELL_BIN:-}" ] && [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] || exit 1
+        [ -z "${TUNA_SHELL_BIN:-}" ] && [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ] || exit 1
         exec /usr/bin/tuna-session --backend winit --socket "$socket"
         ;;
     0)
-        exec "$root/target/debug/tuna-compositor" --backend winit --socket "$socket" \
-            --shell-bin "${TUNA_PROOF_SHELL_BIN:-$root/target/debug/tuna-shell-gtk}"
+        binaries="${TUNA_PROOF_BIN_DIR:-$root/target/debug}"
+        exec "$binaries/tuna-compositor" --backend winit --socket "$socket" \
+            --shell-bin "${TUNA_PROOF_SHELL_BIN:-$binaries/tuna-shell-gtk}"
         ;;
     *) exit 1 ;;
 esac

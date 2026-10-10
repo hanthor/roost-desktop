@@ -275,6 +275,10 @@ esac''')
         result = subprocess.run(['sh', str(ROOT / 'scripts/lib/tuna-proof-session-launch'), '1', str(ROOT), 'owned'], env=dict(self.env, TUNA_SHELL_BIN='/tmp/wrong'), timeout=5)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_supplied_source_binaries_denied_in_installed_launcher(self):
+        result = subprocess.run(['sh', str(ROOT / 'scripts/lib/tuna-proof-session-launch'), '1', str(ROOT), 'owned'], env=dict(self.env, TUNA_PROOF_BIN_DIR='/tmp/source-binaries'), timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+
 
 class ReleaseDelegatePolicy(unittest.TestCase):
     def run_release(self, failure='', version_exit=0):

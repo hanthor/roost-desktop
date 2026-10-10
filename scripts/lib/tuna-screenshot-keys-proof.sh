@@ -10,6 +10,11 @@ while IFS='|' read -r shot_keys shot_dims shot_position shot_label shot_pointer;
     marker="$ARTIFACTS/shot-keys-$shot_label.marker"
     touch "$marker"
     xdotool key Print
+    # GTK 4.14's AT-SPI root can return an unrealized hidden toplevel
+    # when ChildCount/GetChildAtIndex straddle a map transition. Observe
+    # the real mapped layer before walking its accessible tree.
+    cstate 'any(.layers[]; .namespace == "tuna-screenshot-ui")' "screenshot overlay mapped" ||
+        fail G-SCREENSHOT-KEYS "Print did not map selection for $shot_label"
     end=$(($(date +%s) + 20))
     until "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label.json" 5 >/dev/null 2>&1 &&
         showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
@@ -77,6 +82,8 @@ HOST_CURSOR
     dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
     [ "$dims" = "$shot_dims" ] || fail G-SCREENSHOT-KEYS "$shot_label saved $dims, expected $shot_dims"
     cp "$newest" "$ARTIFACTS/shot-keys-$shot_label.png"
+    cstate 'all(.layers[]; .namespace != "tuna-screenshot-ui")' "captured overlay unmapped" ||
+        fail G-SCREENSHOT-KEYS "$shot_label did not close after capture"
 done <<EOF
 ctrl+Left ctrl+Right Left|$((WIDTH / 4 + 5)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 - 5)),$((HEIGHT * 3 / 8))|resize|$((WIDTH * 3 / 8 - 5)),$((HEIGHT / 2 - 1))
 Up ctrl+Up|$((WIDTH / 4)),$((HEIGHT / 4 + 1))|$((WIDTH * 3 / 8)),$((HEIGHT * 3 / 8 - 1))|vertical|$((WIDTH / 2 - 1)),$((HEIGHT * 3 / 8 - 1))
@@ -92,12 +99,16 @@ pass G-SCREENSHOT-KEYS "arrows, Ctrl, Alt, Shift and R produce actual captures w
 pointer_before=$(jq -c '.pointer_position' "$CSTATE")
 workspace_before=$(jq -r '.active_workspace' "$CSTATE")
 xdotool key Print
+cstate 'any(.layers[]; .namespace == "tuna-screenshot-ui")' "screen-mode overlay mapped" ||
+    fail G-SCREENSHOT-KEYS "Print did not map Screen-mode control"
 end=$(($(date +%s) + 20))
 until "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-screen-control.json" 5 >/dev/null 2>&1 &&
     showing "$ARTIFACTS/a11y-shot-screen-control.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
 showing "$ARTIFACTS/a11y-shot-screen-control.json" "Capture" ||
     fail G-SCREENSHOT-KEYS "Print did not open screen-mode negative control"
 xdotool key --clearmodifiers c ctrl+Left alt+shift+Down Escape
+cstate 'all(.layers[]; .namespace != "tuna-screenshot-ui")' "screen-mode overlay unmapped" ||
+    fail G-SCREENSHOT-KEYS "Escape did not unmap Screen-mode control"
 end=$(($(date +%s) + 10))
 while :; do
     "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-screen-dismissed.json" 5 ||

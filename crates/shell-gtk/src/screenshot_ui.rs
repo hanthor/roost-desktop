@@ -182,7 +182,9 @@ struct PickerWindow {
 }
 
 pub struct ScreenshotUi {
-    window: gtk::Window,
+    window: RefCell<Option<gtk::Window>>,
+    app: gtk::Application,
+    overlay: gtk::Overlay,
     canvas: gtk::DrawingArea,
     fixed: gtk::Fixed,
     panel: gtk::Box,
@@ -228,19 +230,6 @@ impl ScreenshotUi {
         recorder: Rc<Recorder>,
         move_pointer: Rc<dyn Fn((f64, f64))>,
     ) -> Rc<Self> {
-        let window = gtk::Window::new();
-        window.set_application(Some(app));
-        window.add_css_class("tuna-screenshot-ui");
-        window.set_title(Some("Screenshot"));
-        window.init_layer_shell();
-        window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(tuna_shell_control::SCREENSHOT_NAMESPACE));
-        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-            window.set_anchor(edge, true);
-        }
-        window.set_exclusive_zone(-1);
-        window.set_keyboard_mode(KeyboardMode::Exclusive);
-
         let canvas = gtk::DrawingArea::new();
         canvas.set_accessible_role(gtk::AccessibleRole::Img);
         canvas.set_hexpand(true);
@@ -249,7 +238,6 @@ impl ScreenshotUi {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&canvas));
         overlay.add_overlay(&fixed);
-        window.set_child(Some(&overlay));
 
         // The panel.
         let panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -325,7 +313,9 @@ impl ScreenshotUi {
         fixed.put(&close, 0.0, 0.0);
 
         let ui = Rc::new(Self {
-            window,
+            window: RefCell::new(None),
+            app: app.clone(),
+            overlay: overlay.clone(),
             canvas,
             fixed,
             panel,
@@ -508,7 +498,7 @@ impl ScreenshotUi {
                                 | gdk::ModifierType::CONTROL_MASK
                                 | gdk::ModifierType::SHIFT_MASK,
                         ) {
-                            ui.window.child_focus(match direction {
+                            ui.overlay.child_focus(match direction {
                                 Direction::Left => gtk::DirectionType::Left,
                                 Direction::Right => gtk::DirectionType::Right,
                                 Direction::Up => gtk::DirectionType::Up,
@@ -521,7 +511,7 @@ impl ScreenshotUi {
                 glib::Propagation::Stop
             });
         }
-        ui.window.add_controller(keys);
+        ui.overlay.add_controller(keys);
         ui.set_mode(Mode::Selection);
         ui
     }
@@ -600,7 +590,12 @@ impl ScreenshotUi {
     }
 
     fn open_in(self: &Rc<Self>, cast: bool) {
-        if self.window.is_visible() {
+        if self
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.is_visible())
+        {
             return;
         }
         let dir = glib::user_runtime_dir();
@@ -741,7 +736,7 @@ impl ScreenshotUi {
             .as_ref()
             .map(|t| (t.width(), t.height()))
             .unwrap_or((1280, 800));
-        let monitor = WidgetExt::display(&self.window)
+        let monitor = WidgetExt::display(&self.canvas)
             .monitors()
             .item(0)
             .and_then(|m| m.downcast::<gdk::Monitor>().ok())
@@ -771,11 +766,42 @@ impl ScreenshotUi {
         );
         self.set_cast(cast);
         self.set_mode(self.mode.get());
-        self.window.present();
+        let window = self
+            .window
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Self::new_window(&self.app, &self.overlay));
+        *self.window.borrow_mut() = Some(window.clone());
+        window.present();
+    }
+
+    fn new_window(app: &gtk::Application, overlay: &gtk::Overlay) -> gtk::Window {
+        let window = gtk::Window::new();
+        window.set_application(Some(app));
+        window.add_css_class("tuna-screenshot-ui");
+        window.set_title(Some("Screenshot"));
+        window.init_layer_shell();
+        window.set_layer(Layer::Overlay);
+        window.set_namespace(Some(tuna_shell_control::SCREENSHOT_NAMESPACE));
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            window.set_anchor(edge, true);
+        }
+        window.set_exclusive_zone(-1);
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+
+        window.set_child(Some(overlay));
+        window
     }
 
     fn close(&self) {
-        self.window.set_visible(false);
+        // Remove the retired toplevel before GTK's AT-SPI root can
+        // return its unrealized context for a stale child index. Content
+        // and shortcuts persist; each opening gets a fresh layer surface.
+        let retired = self.window.borrow_mut().take();
+        if let Some(window) = retired {
+            window.set_child(None::<&gtk::Widget>);
+            window.destroy();
+        }
         self.frozen.borrow_mut().take();
         for old in self.windows.borrow_mut().drain(..) {
             self.fixed.remove(&old.button);

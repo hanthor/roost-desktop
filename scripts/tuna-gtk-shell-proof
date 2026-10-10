@@ -186,6 +186,14 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$ARTIFACTS"
 ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
+OWNED_RUNTIME=""
+# AT-SPI uses a fixed socket below XDG_RUNTIME_DIR. A private session
+# bus alone cannot isolate simultaneous nested proof sessions.
+OWNED_RUNTIME="$(mktemp -d /tmp/tuna-gtk-runtime.XXXXXX)"
+chmod 0700 "$OWNED_RUNTIME"
+XDG_RUNTIME_DIR="$OWNED_RUNTIME"
+export XDG_RUNTIME_DIR
+printf '%s\n' "$XDG_RUNTIME_DIR" >"$ARTIFACTS/runtime-directory.txt"
 if [ "$INSTALLED_PACKAGE" = 1 ]; then
     # The private bus has already been established. Do not allow an inherited
     # display/explicit shell override to stand in for installed default selection.
@@ -331,7 +339,9 @@ cleanup() {
     # shellcheck disable=SC2086
     if [ -n "$PW_PIDS" ]; then kill $PW_PIDS 2>/dev/null || true; fi
     for portal_pid in $PORTAL_PIDS; do kill "$portal_pid" 2>/dev/null || true; done
+    if [ -n "${AT_SPI_PID:-}" ]; then kill "$AT_SPI_PID" 2>/dev/null || true; fi
     rm -rf "${PIPEWIRE_RUNTIME_DIR:-/nonexistent}"
+    if [ -n "$OWNED_RUNTIME" ]; then rm -rf "$OWNED_RUNTIME"; fi
     if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
@@ -378,7 +388,43 @@ export TUNA_COMPOSITOR_STATE
 # Accessibility bus for GTK's AT-SPI backend.
 if [ -x /usr/libexec/at-spi-bus-launcher ]; then
     /usr/libexec/at-spi-bus-launcher --launch-immediately >"$ARTIFACTS/atspi.log" 2>&1 &
+    AT_SPI_PID=$!
+    # Bind all GTK/pyatspi processes to this proof's private accessibility
+    # bus, rather than rediscovering a shared runtime bus for each dump.
+    AT_SPI_BUS_ADDRESS="$("$PY" - <<'AT_SPI_ADDRESS'
+import time
+from gi.repository import Gio
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+end = time.monotonic() + 10
+while True:
+    try:
+        reply = bus.call_sync('org.a11y.Bus', '/org/a11y/bus',
+                              'org.a11y.Bus', 'GetAddress', None, None,
+                              Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+        print(reply.unpack()[0])
+        break
+    except Exception:
+        if time.monotonic() >= end:
+            raise
+        time.sleep(0.1)
+AT_SPI_ADDRESS
+)"
+    export AT_SPI_BUS_ADDRESS
+    printf '%s\n' "$AT_SPI_BUS_ADDRESS" >"$ARTIFACTS/atspi-address.txt"
 fi
+"$PY" - "$ARTIFACTS/session-isolation.json" <<'SESSION_ISOLATION'
+import json, os, pathlib, sys
+runtime = pathlib.Path(os.environ['XDG_RUNTIME_DIR'])
+mode = runtime.stat().st_mode & 0o777
+assert mode == 0o700, 'proof runtime must be private'
+assert os.environ.get('AT_SPI_BUS_ADDRESS'), 'explicit accessibility bus is required'
+assert str(runtime) in os.environ['AT_SPI_BUS_ADDRESS'], 'accessibility bus must belong to the proof runtime'
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    'runtime_directory': str(runtime), 'runtime_mode': oct(mode),
+    'session_bus': os.environ.get('DBUS_SESSION_BUS_ADDRESS'),
+    'accessibility_bus': os.environ['AT_SPI_BUS_ADDRESS'],
+}, indent=2) + '\n')
+SESSION_ISOLATION
 
 [ -n "$DISPLAY_ARG" ] && DISPLAY="$DISPLAY_ARG" && export DISPLAY
 if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
@@ -662,7 +708,7 @@ export TUNA_PROOF_SWIPE_INPUT
 TUNA_ANIMATION_CLOCK="$ARTIFACTS/animation-clock"
 rm -f "$TUNA_ANIMATION_CLOCK"
 export TUNA_ANIMATION_CLOCK
-if [ "$INSTALLED_PACKAGE" = 0 ]; then
+if [ "$INSTALLED_PACKAGE" = 0 ] && [ -z "${TUNA_PROOF_BIN_DIR:-}" ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-shell-gtk -p tuna-shell-host
     if [ "$SCREENSHOT_KEYS_ONLY" = 0 ]; then
         cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
@@ -741,16 +787,24 @@ if [ "$SCREENSHOT_KEYS_ONLY" = 1 ]; then
         fail G-SCREENSHOT-KEYS "desktop never became ready"
     if [ "$INSTALLED_PACKAGE" = 0 ]; then
         "$PY" - "$ROOT" "$ARTIFACTS/screenshot-keys-source.json" <<'SCREENSHOT_SOURCE'
-import hashlib, json, pathlib, subprocess, sys
+import hashlib, json, os, pathlib, subprocess, sys
 root, output = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+binaries = pathlib.Path(os.environ.get("TUNA_PROOF_BIN_DIR", root / "target/debug"))
 def git(*args):
     return subprocess.check_output(["git", "-C", str(root), *args])
 proof = {
     "qualification_scope": "nested GTK screenshot keyboard controls; not hardware or installed-image qualification",
     "source_commit": git("rev-parse", "HEAD").decode().strip(),
     "source_diff_sha256": hashlib.sha256(git("diff", "HEAD", "--binary")).hexdigest(),
+    "binary_source_commit": os.environ.get("TUNA_PROOF_BINARY_SOURCE_COMMIT") if os.environ.get("TUNA_PROOF_BIN_DIR") else git("rev-parse", "HEAD").decode().strip(),
+    "supplied_binary_dir": os.environ.get("TUNA_PROOF_BIN_DIR"),
+    "shell_launcher_override": os.environ.get("TUNA_PROOF_SHELL_BIN"),
+    "runtime_directory": os.environ.get("XDG_RUNTIME_DIR"),
+    "runtime_mode": oct(pathlib.Path(os.environ["XDG_RUNTIME_DIR"]).stat().st_mode & 0o777),
+    "accessibility_bus": os.environ.get("AT_SPI_BUS_ADDRESS"),
+    "session_bus": os.environ.get("DBUS_SESSION_BUS_ADDRESS"),
     "binaries": {
-        name: hashlib.sha256((root / "target/debug" / name).read_bytes()).hexdigest()
+        name: hashlib.sha256((binaries / name).read_bytes()).hexdigest()
         for name in ("tuna-compositor", "tuna-shell-gtk")
     },
 }
