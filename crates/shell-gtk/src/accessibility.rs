@@ -386,10 +386,11 @@ mod tests {
         let prefs = gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None);
         prefs.set_int(FOCUS_KEY, 1).unwrap();
         let existing = gtk::Window::new();
+        existing.present();
+        drain(0.2);
         existing.set_focus_visible(true);
         prefs.set_int(FOCUS_KEY, 0).unwrap();
         install_focus_policy(prefs.clone());
-        existing.present();
         drain(3.5);
         assert!(
             existing.gets_focus_visible(),
