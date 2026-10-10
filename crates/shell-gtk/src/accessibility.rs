@@ -197,6 +197,9 @@ fn install_focus_policy(settings: gio::Settings) {
     {
         settings
             .bind(FOCUS_KEY, &toolkit, "gtk-keyboard-focus-visible-timeout")
+            .flags(gio::SettingsBindFlags::GET)
+            // GNOME accepts every negative value; GTK's property minimum is -1.
+            .mapping(|value, _| value.get::<i32>().map(|v| v.max(-1).to_value()))
             .build();
         // Toolkit owns keyboard/mouse handling and timers on GTK >= 4.23.3.
         return;
