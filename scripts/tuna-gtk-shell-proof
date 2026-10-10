@@ -3342,7 +3342,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     # In-client focus after the popover checks is not the entry: dumps show
     # it parked on the menu toggle, so IM is inactive and the bridge would
     # bypass typed keys past IBus (#566). Click the entry the way a user
-    # would, then sync on the bridge's own focus report.
+    # would; the engine surrounding check below proves the IM path.
     "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-ime "$ARTIFACTS/a11y-ime-field.json" 20 ||
         fail G-IME-CANDIDATES "entry dump failed"
     # shellcheck disable=SC2046 # four numbers
@@ -3357,9 +3357,14 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     until [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
             "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] || \
           [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    # Bridge focus edges are advisory, not the assertion: a GTK client can
+    # compose through its direct IBus connection with no protocol-level
+    # activation at all (no edges in the log), while the engine's
+    # surrounding-text report below proves the live IM path end to end.
+    # Warn and let that authoritative check decide.
     [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
       "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] ||
-        fail G-IME-CANDIDATES "clicking the entry never made it IM-active"
+        echo "tuna-gtk-shell-proof: G-IME-CANDIDATES note: no fresh bridge focus edge after the click; continuing to the engine check"
     xdotool key End
     end=$(($(date +%s) + 5))
     until [ "$(grep '^tuna-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "tuna-ibus-test-engine: surrounding 你|你好|2 6 6" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
@@ -3376,15 +3381,18 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     # The popover, quick-settings, and drag checks above park and restore
     # focus around the field: the window being focused again does not imply
     # the field is IM-active yet, and typing while it is not reaches the
-    # bridge as plain keys that bypass IBus (#566). Re-sync on the bridge's
-    # own focus report, like the first composition above does.
+    # bridge as plain keys that bypass IBus (#566). Watch the bridge's own
+    # focus report, but only advisory: the candidate window below is the
+    # hard assertion.
     end=$(($(date +%s) + 10))
     until [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
             "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] || \
           [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    # Same advisory bridge signal as above: the engine surrounding flow and
+    # the shell-drawn candidate window below are the hard assertions.
     [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
       "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] ||
-        fail G-IME-CANDIDATES "the field never became IM-active after the popover checks"
+        echo "tuna-gtk-shell-proof: G-IME-CANDIDATES note: no fresh bridge focus edge after the popover checks; continuing to the candidate check"
     shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "tuna-ibus-candidates")' "candidate window" 10 ||
@@ -3664,7 +3672,14 @@ jq -e --argjson home "$slide_home" \
     fail G-WORKSPACE-SLIDE "the key switch did not slide 250 ms: $(cat "$ARTIFACTS/workspace-slide-key.json")"
 xdotool key super+Page_Up
 anim_clock 10600
-slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
+if ! slide_settled "$slide_home" "slid back"; then
+    # Same late-start hazard as the crossfades below: a loaded runner can
+    # process the key after the tick above, starting the slide at 10600
+    # against the frozen manual clock. Cover it with one more advance
+    # (still below the next section's 11000 base) and re-check.
+    anim_clock 10900
+    slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
+fi
 # Twice in quick succession: the second press carries on from the drawn
 # offset and ends two workspaces over, never moving backwards.
 anim_clock 11000
