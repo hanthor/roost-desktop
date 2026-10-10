@@ -158,9 +158,13 @@ impl ProtocolVersion {
     /// `0.28` replaces `InputSettings::enable_animations` with `motion`,
     /// GNOME's three-state motion policy plus its slow-down factor.
     /// The positional postcard body changes, so both peers ship together.
+    ///
+    /// `0.29` appends the shell-to-compositor `SetIconGeometries` command
+    /// (where each window's dash icon sits, so minimize and restore head
+    /// there, as Mutter's `set_icon_geometry`), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 28,
+        minor: 29,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -376,6 +380,29 @@ pub enum CommandKind {
     /// Preference from the authenticated supervised shell. Nested runtimes
     /// ignore it; the hardware compositor owns the actual Orca child.
     SetScreenReader { enabled: bool },
+    /// Where each window's app icon sits in the dash or dock, the full
+    /// set each time it changes (Mutter's `meta_window_set_icon_geometry`).
+    /// Minimize shrinks a window into its icon and restore grows it back;
+    /// a window without one heads to the monitor corner, as GNOME's.
+    /// At most [`MAX_ICON_GEOMETRIES`].
+    SetIconGeometries {
+        /// One rectangle per window, in global logical pixels.
+        icons: Vec<IconGeometry>,
+    },
+}
+
+/// Icon rectangles held at once.
+pub const MAX_ICON_GEOMETRIES: usize = 512;
+
+/// One window's dash or dock icon, in global logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IconGeometry {
+    /// The window the icon stands for.
+    pub window: WindowId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// Screen Reader process lifecycle, not proof of spoken usability.
@@ -1164,6 +1191,14 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 postcard::Error::DeserializeBadEncoding,
             ));
         }
+        Message::Command {
+            kind: CommandKind::SetIconGeometries { icons },
+            ..
+        } if icons.len() > MAX_ICON_GEOMETRIES => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
         Message::Hello { .. }
         | Message::AcceleratorActivated { .. }
         | Message::WindowMenu { .. }
@@ -1234,8 +1269,65 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_28() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
+    fn current_version_is_0_29() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 29));
+    }
+
+    #[test]
+    fn icon_geometries_survive_the_control_wire() {
+        roundtrip(&Message::Command {
+            id: 74,
+            kind: CommandKind::SetIconGeometries {
+                icons: vec![
+                    IconGeometry {
+                        window: 3,
+                        x: 520,
+                        y: 712,
+                        width: 76,
+                        height: 76,
+                    },
+                    IconGeometry {
+                        window: u64::MAX,
+                        x: -1920,
+                        y: 0,
+                        width: 0,
+                        height: 0,
+                    },
+                ],
+            },
+        });
+        roundtrip(&Message::Command {
+            id: 75,
+            kind: CommandKind::SetIconGeometries { icons: Vec::new() },
+        });
+    }
+
+    #[test]
+    fn too_many_icon_geometries_are_rejected() {
+        let icon = IconGeometry {
+            window: 1,
+            x: 0,
+            y: 0,
+            width: 76,
+            height: 76,
+        };
+        let at_cap = encode_frame(&Message::Command {
+            id: 1,
+            kind: CommandKind::SetIconGeometries {
+                icons: vec![icon; MAX_ICON_GEOMETRIES],
+            },
+        });
+        assert!(decode_frame(&at_cap).is_ok());
+        let over = encode_frame(&Message::Command {
+            id: 1,
+            kind: CommandKind::SetIconGeometries {
+                icons: vec![icon; MAX_ICON_GEOMETRIES + 1],
+            },
+        });
+        assert!(matches!(
+            decode_frame(&over),
+            Err(DecodeError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -1335,7 +1427,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 30).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

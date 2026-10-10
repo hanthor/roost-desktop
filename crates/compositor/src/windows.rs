@@ -290,6 +290,9 @@ pub struct WindowManager {
     strip_shown: f64,
     animations_enabled: bool,
     column_animations: HashMap<u64, crate::animation::ColumnSpring>,
+    /// GNOME's minimize and restore animations: hiding and restoring
+    /// stay instant here, these only change where frames draw.
+    pub(crate) minimize_animations: crate::minimize_animation::MinimizeAnimations,
     /// The running view spring and its elapsed seconds, while the drawn
     /// view has not settled on the target.
     strip_anim: Option<(crate::spring::Spring, f64)>,
@@ -359,6 +362,7 @@ impl WindowManager {
             strip_shown: 0.0,
             animations_enabled: true,
             column_animations: HashMap::new(),
+            minimize_animations: Default::default(),
             strip_anim: None,
             workspace_slide: Default::default(),
             super_held: false,
@@ -1613,7 +1617,10 @@ impl WindowManager {
         if let Some(id) = id {
             // Activating a hidden window brings it back (GNOME).
             if let Some(window) = self.windows.get_mut(&id) {
-                window.minimized = false;
+                if std::mem::replace(&mut window.minimized, false) {
+                    self.minimize_animations
+                        .queue(id, crate::minimize_animation::Direction::Restore);
+                }
             }
             // Floating stacks raise focus to the top; the strip keeps
             // column order independent of focus (niri shape), so focus
@@ -2407,6 +2414,8 @@ impl WindowManager {
             return true;
         }
         window.minimized = true;
+        self.minimize_animations
+            .queue(id, crate::minimize_animation::Direction::Minimize);
         if self.model.focused() == Some(id) {
             let workspace = self.model.active_workspace();
             self.focus_topmost(state, workspace);

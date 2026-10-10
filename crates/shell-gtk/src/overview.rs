@@ -146,6 +146,9 @@ pub struct OverviewUi {
     dash: gtk::ApplicationWindow,
     dash_row: gtk::Box,
     dash_signature: Vec<(u64, Option<String>, Option<String>)>,
+    /// Each running dash tile and the windows it stands for: minimize
+    /// heads into the tile (Mutter's icon geometry).
+    dash_tiles: RefCell<Vec<(gtk::Widget, Vec<u64>)>>,
     grid: gtk::ApplicationWindow,
     apps: Rc<LiveApps>,
     favorites: Vec<String>,
@@ -275,6 +278,7 @@ impl OverviewUi {
             dash,
             dash_row,
             dash_signature: Vec::new(),
+            dash_tiles: RefCell::default(),
             grid,
             apps,
             favorites,
@@ -434,6 +438,20 @@ impl OverviewUi {
         let mut running = me.actions.running();
         running.sort_by_key(|(id, _)| *id);
         let apps = me.apps.get();
+        let mut tiles = Vec::new();
+        // Every window an app's tile stands for, as GNOME's app tracker
+        // groups them.
+        let windows_of = |entry: &AppEntry| -> Vec<u64> {
+            running
+                .iter()
+                .filter(|(_, app)| {
+                    app.as_deref()
+                        .and_then(|app| providers::provider_app(&apps, app))
+                        .is_some_and(|e| e.app_id == entry.app_id)
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        };
         let window_of = |entry: &AppEntry| {
             running
                 .iter()
@@ -476,6 +494,10 @@ impl OverviewUi {
             }
             let window = window_of(entry);
             let button = dash_tile(entry, window.is_some());
+            let windows = windows_of(entry);
+            if !windows.is_empty() {
+                tiles.push((button.clone().upcast::<gtk::Widget>(), windows));
+            }
             let entry = entry.clone();
             let actions = me.actions.clone();
             button.connect_clicked(move |_| match window {
@@ -511,6 +533,7 @@ impl OverviewUi {
                 categories: Vec::new(),
             };
             let button = dash_tile(&entry, true);
+            tiles.push((button.clone().upcast::<gtk::Widget>(), vec![window]));
             let actions = me.actions.clone();
             button.connect_clicked(move |_| {
                 actions.activate_window(window);
@@ -540,6 +563,7 @@ impl OverviewUi {
             });
         }
         me.dash_row.append(&show_apps);
+        *me.dash_tiles.borrow_mut() = tiles;
         drop(apps);
         drop(me);
         Self::rebuild_grid(ui);
@@ -881,6 +905,53 @@ impl OverviewUi {
             (true, false, false) => ui.borrow().actions.close_overview(),
             _ => {}
         }
+    }
+
+    /// Where each running window's dash tile sits, in global logical
+    /// pixels, while the dash shows; `None` while it is hidden, so the
+    /// last positions it showed at stay current. Cheap: a few bounds.
+    pub fn icon_geometries(
+        ui: &Rc<RefCell<Self>>,
+    ) -> Option<Vec<tuna_shell_control::IconGeometry>> {
+        let me = ui.borrow();
+        if !me.dash.is_mapped() {
+            return None;
+        }
+        let monitor = me
+            .dash
+            .surface()
+            .and_then(|surface| WidgetExt::display(&me.dash).monitor_at_surface(&surface))?
+            .geometry();
+        // Full width along the bottom, 12px up (see `new`).
+        let origin = (
+            f64::from(monitor.x()),
+            f64::from(monitor.y() + monitor.height() - 12 - me.dash.height()),
+        );
+        if me.dash.height() <= 0 {
+            return None;
+        }
+        let tiles = me.dash_tiles.borrow();
+        let mut out = Vec::new();
+        for (tile, windows) in tiles.iter() {
+            // A freshly rebuilt dash lays its tiles out on the next frame:
+            // until then keep the last good positions rather than zeros.
+            let bounds = tile.compute_bounds(&me.dash)?;
+            if !tile.is_mapped() || bounds.width() < 1.0 || bounds.height() < 1.0 {
+                return None;
+            }
+            for window in windows {
+                out.push(tuna_shell_control::IconGeometry {
+                    window: *window,
+                    x: (origin.0 + f64::from(bounds.x())).round() as i32,
+                    y: (origin.1 + f64::from(bounds.y())).round() as i32,
+                    width: bounds.width().round() as i32,
+                    height: bounds.height().round() as i32,
+                });
+            }
+        }
+        out.sort_by_key(|icon| icon.window);
+        out.truncate(tuna_shell_control::MAX_ICON_GEOMETRIES);
+        Some(out)
     }
 
     /// Follow the compositor's overview state.

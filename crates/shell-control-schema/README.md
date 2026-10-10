@@ -19,7 +19,7 @@ before decoding.
   `InputSettings`, `WindowId`, `WorkspaceId`, `dynamic_workspace_count`.
 - Tokens and secrets: `ActivationToken`, `TokenMeta`, `Secret`.
 - Switcher and keybindings: `SwitcherAction`, `SwitcherKey`,
-  `SwitcherThumbnail`, `WindowAction`, `Accelerator`, and the `MOD_*` and
+  `SwitcherThumbnail`, `WindowAction`, `Accelerator`, `IconGeometry`, and the `MOD_*` and
   `MODE_*` constants.
 
 Its only dependencies are `postcard` and `serde`. Tests are inline in
