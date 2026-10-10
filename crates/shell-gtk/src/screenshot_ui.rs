@@ -801,10 +801,12 @@ impl ScreenshotUi {
                 glib::Propagation::Proceed
             }
         });
-        // Also cover direct GTK destruction: a destroyed window must never
-        // remain in the slot and be reused by a later screenshot request.
+        // GTK's destroy signal waits for the final object reference, while
+        // direct GtkWindow.destroy removes its native surface immediately.
+        // Retire on unrealize so the held reference cannot keep a dead
+        // window in the slot. Finish destruction after signal emission.
         let weak = Rc::downgrade(self);
-        window.connect_destroy(move |window| {
+        window.connect_unrealize(move |window| {
             if let Some(ui) = weak.upgrade() {
                 let current = ui
                     .window
@@ -815,6 +817,8 @@ impl ScreenshotUi {
                     ui.window.borrow_mut().take();
                     window.set_child(None::<&gtk::Widget>);
                     ui.close();
+                    let retired = window.clone();
+                    glib::idle_add_local_once(move || retired.destroy());
                 }
             }
         });
