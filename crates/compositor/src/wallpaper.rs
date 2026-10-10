@@ -94,16 +94,25 @@ struct Loaded {
     /// Output size the pixels match (`None` when the URI failed).
     size: Option<Size<i32, Logical>>,
     /// ARGB8888 pixels at `size`, ready to upload.
-    pixels: Option<Vec<u8>>,
+    pixels: Option<std::sync::Arc<[u8]>>,
     /// The uploadable buffer, kept so its texture is uploaded once, not
     /// every frame.
     buffer: Option<MemoryRenderBuffer>,
+    cards_prewarmed: bool,
 }
 
 /// One rendered overview card (GNOME's workspace background), cached by
 /// what it shows and its size.
+type CardKey = (String, Size<i32, Logical>, i32, i32, i32, Option<[u8; 3]>);
+
+#[derive(Debug)]
+struct PendingCard {
+    key: CardKey,
+    result: std::sync::mpsc::Receiver<Option<tuna_wallpaper::Card>>,
+}
+
 struct CardCache {
-    key: (String, Size<i32, Logical>, i32, i32, Option<[u8; 3]>),
+    key: CardKey,
     buffer: MemoryRenderBuffer,
     margin: i32,
 }
@@ -134,6 +143,8 @@ pub struct Wallpaper {
     accent: Option<[f32; 3]>,
     /// Overview cards.
     cards: Vec<CardCache>,
+    /// Keep unfinished jobs counted across wallpaper/layout changes.
+    card_pending: Vec<PendingCard>,
     /// The lock screen's blurred, dimmed copy, by URI and output size.
     locked: Vec<(String, Size<i32, Logical>, MemoryRenderBuffer)>,
 }
@@ -205,10 +216,20 @@ impl Wallpaper {
             "decode_pending": self.pending.iter().take(MAX_WALLPAPER_SLOTS).map(|item| serde_json::json!({
                 "request_key": text(&item.uri), "size": [item.size.w, item.size.h],
             })).collect::<Vec<_>>(),
+            "card_pending_count": self.card_pending.len(),
+            "card_cache_count": self.cards.len(),
+            "card_pending": self.card_pending.iter().take(MAX_CARDS).map(|job| serde_json::json!({
+                "request_key": text(&job.key.0), "output": [job.key.1.w, job.key.1.h],
+                "rendered": [job.key.2, job.key.3], "crop_top": job.key.4,
+            })).collect::<Vec<_>>(),
+            "card_cache": self.cards.iter().take(MAX_CARDS).map(|card| serde_json::json!({
+                "request_key": text(&card.key.0), "output": [card.key.1.w, card.key.1.h],
+                "rendered": [card.key.2, card.key.3], "crop_top": card.key.4,
+            })).collect::<Vec<_>>(),
             "decode_result_count": self.loaded.len(),
             "decode_results": self.loaded.iter().take(MAX_WALLPAPER_SLOTS).map(|item| serde_json::json!({
                 "request_key": text(&item.uri), "size": item.size.map(|s| [s.w, s.h]),
-                "pixel_bytes": item.pixels.as_ref().map(Vec::len),
+                "pixel_bytes": item.pixels.as_ref().map(|pixels| pixels.len()),
                 "buffer_available": item.buffer.is_some(),
             })).collect::<Vec<_>>(),
         })
@@ -330,6 +351,7 @@ impl Wallpaper {
         if self.loaded.len() >= MAX_WALLPAPER_SLOTS {
             self.loaded.remove(0);
         }
+        let pixels = pixels.map(std::sync::Arc::<[u8]>::from);
         let buffer = pixels.as_ref().map(|pixels| {
             MemoryRenderBuffer::from_slice(
                 pixels,
@@ -345,6 +367,7 @@ impl Wallpaper {
             size: Some(output),
             pixels,
             buffer,
+            cards_prewarmed: false,
         });
     }
 
@@ -375,6 +398,22 @@ impl Wallpaper {
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
         let uri = self.refresh(output, geometry)?;
+        self.poll_cards();
+        if self.loaded.iter().any(|loaded| {
+            loaded.uri == uri
+                && loaded.size == Some(output)
+                && !loaded.cards_prewarmed
+                && loaded.pixels.is_some()
+        }) {
+            self.prewarm_cards(output, geometry, &uri);
+            if let Some(loaded) = self
+                .loaded
+                .iter_mut()
+                .find(|loaded| loaded.uri == uri && loaded.size == Some(output))
+            {
+                loaded.cards_prewarmed = true;
+            }
+        }
         let loaded = self
             .loaded
             .iter()
@@ -555,7 +594,7 @@ impl Wallpaper {
     /// `0 4px 16px 4px` shadow at 20%, both scaled with the card as GNOME
     /// scales them. Without a picture it shows `primary-color`.
     ///
-    /// The card is rendered (in software) at its `settled` size only and
+    /// The card is rendered on a bounded worker at its `settled` size only and
     /// drawn scaled to `card`: overview transition frames resize the card
     /// every frame, and re-rendering it per size cost a full crop, resize
     /// and shadow blur on the compositor thread each frame while evicting
@@ -580,58 +619,7 @@ impl Wallpaper {
             card.size
         };
         let uri = self.refresh(output, geometry).unwrap_or_default();
-        let color = self.color.map(|[r, g, b]| {
-            [
-                (r * 255.0).round() as u8,
-                (g * 255.0).round() as u8,
-                (b * 255.0).round() as u8,
-            ]
-        });
-        let key = (uri.clone(), output, rendered.w, rendered.h, color);
-        if !self.cards.iter().any(|c| c.key == key) {
-            let full = self
-                .loaded
-                .iter()
-                .find(|l| l.uri == uri && l.size == Some(output))
-                .and_then(|l| l.pixels.as_deref());
-            // Still decoding: draw nothing new yet rather than cache a
-            // colour card the picture will replace.
-            if !uri.is_empty() && full.is_none() {
-                return None;
-            }
-            let scale = f64::from(rendered.w) / f64::from(output.w.max(1));
-            let s = scale as f32;
-            let top = work_top.clamp(0, output.h - 1) as u32;
-            let rendered = tuna_wallpaper::card(
-                full.map(|p| (p, output.w as u32, output.h as u32)),
-                (0, top, output.w as u32, output.h as u32 - top),
-                color.unwrap_or([0x14, 0x17, 0x1c]),
-                rendered.w as u32,
-                rendered.h as u32,
-                30.0 * s,
-                tuna_wallpaper::Shadow {
-                    dy: 4.0 * s,
-                    blur: 16.0 * s,
-                    spread: 4.0 * s,
-                    alpha: 0.2,
-                },
-            )?;
-            if self.cards.len() >= MAX_CARDS {
-                self.cards.remove(0);
-            }
-            self.cards.push(CardCache {
-                key: key.clone(),
-                buffer: MemoryRenderBuffer::from_slice(
-                    &rendered.pixels,
-                    Fourcc::Argb8888,
-                    (rendered.width as i32, rendered.height as i32),
-                    1,
-                    Transform::Normal,
-                    None,
-                ),
-                margin: rendered.margin as i32,
-            });
-        }
+        let key = self.request_card(&uri, output, work_top, rendered)?;
         let cached = self.cards.iter().find(|c| c.key == key)?;
         let (location, size) = card_placement(card, rendered, cached.margin);
         MemoryRenderBufferRenderElement::from_buffer(
@@ -645,6 +633,165 @@ impl Wallpaper {
         )
         .ok()
     }
+
+    /// Prepare the common two-workspace picker during desktop painting, before
+    /// the first overview keypress. Layout changes use the same async path on
+    /// demand. Use logical geometry first so fractional-scale rounding matches
+    /// the real overview; the card crop itself is in physical pixels.
+    fn prewarm_cards(&mut self, output: Size<i32, Logical>, geometry: Geometry, uri: &str) {
+        let scale = f64::from_bits(geometry.scale_bits);
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let top = (f64::from(crate::windows::WORK_AREA_TOP) * scale).round() as i32;
+        for rendered in picker_card_sizes(output, scale) {
+            self.request_card(uri, output, top, rendered);
+        }
+    }
+
+    /// Collect completed preparation even while the overview is closed, so the
+    /// worker pixels do not sit in channels until the first keypress and the
+    /// diagnostics distinguish prepared cache entries from unfinished work.
+    fn poll_cards(&mut self) {
+        let mut index = 0;
+        while index < self.card_pending.len() {
+            let result = match self.card_pending[index].result.try_recv() {
+                Ok(card) => Some(card),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                let pending = self.card_pending.remove(index);
+                if let Some(card) = result {
+                    if self.cards.len() >= MAX_CARDS {
+                        self.cards.remove(0);
+                    }
+                    self.cards.push(CardCache {
+                        key: pending.key,
+                        buffer: MemoryRenderBuffer::from_slice(
+                            &card.pixels,
+                            Fourcc::Argb8888,
+                            (card.width as i32, card.height as i32),
+                            1,
+                            Transform::Normal,
+                            None,
+                        ),
+                        margin: card.margin as i32,
+                    });
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Poll only in-memory results on the compositor thread. Cropping, scaling,
+    /// rounding and the shadow blur run on at most MAX_CARDS bounded workers.
+    /// A cache miss never blocks input dispatch or renders a stale wallpaper.
+    fn request_card(
+        &mut self,
+        uri: &str,
+        output: Size<i32, Logical>,
+        work_top: i32,
+        rendered: Size<i32, Physical>,
+    ) -> Option<CardKey> {
+        if output.w <= 0
+            || output.h <= 0
+            || rendered.w <= 0
+            || rendered.h <= 0
+            || rendered.w as u64 * rendered.h as u64 > MAX_WALLPAPER_AREA
+        {
+            return None;
+        }
+        // The shadow extends with width/output scale. Area of the content
+        // alone does not bound an extremely wide card's shadow allocation.
+        let margin = (24.0 * f64::from(rendered.w) / f64::from(output.w)).ceil() as u64 + 2;
+        let outer = (rendered.w as u64 + 2 * margin).checked_mul(rendered.h as u64 + 2 * margin);
+        if outer.is_none_or(|area| area > MAX_WALLPAPER_AREA) {
+            return None;
+        }
+        let color = self.color.map(|rgb| rgb.map(|v| (v * 255.0).round() as u8));
+        let top = work_top.clamp(0, output.h - 1);
+        // Crop origin is part of the image, even when output/card size stays fixed.
+        let key = (uri.to_owned(), output, rendered.w, rendered.h, top, color);
+        self.poll_cards();
+        if self.cards.iter().any(|card| card.key == key)
+            || self.card_pending.iter().any(|card| card.key == key)
+            || self.card_pending.len() >= MAX_CARDS
+        {
+            return Some(key);
+        }
+        let full = self
+            .loaded
+            .iter()
+            .find(|loaded| loaded.uri == uri && loaded.size == Some(output))
+            .and_then(|loaded| loaded.pixels.clone());
+        if !uri.is_empty() && full.is_none() {
+            return None;
+        }
+        let (send, result) = std::sync::mpsc::channel();
+        if std::thread::Builder::new()
+            .name("tuna-wallpaper-card".into())
+            .spawn(move || {
+                let scale = rendered.w as f32 / output.w as f32;
+                let card = tuna_wallpaper::card(
+                    full.as_deref()
+                        .map(|p| (p, output.w as u32, output.h as u32)),
+                    (0, top as u32, output.w as u32, (output.h - top) as u32),
+                    color.unwrap_or([0x14, 0x17, 0x1c]),
+                    rendered.w as u32,
+                    rendered.h as u32,
+                    30.0 * scale,
+                    tuna_wallpaper::Shadow {
+                        dy: 4.0 * scale,
+                        blur: 16.0 * scale,
+                        spread: 4.0 * scale,
+                        alpha: 0.2,
+                    },
+                );
+                let _ = send.send(card);
+            })
+            .is_ok()
+        {
+            self.card_pending.push(PendingCard {
+                key: key.clone(),
+                result,
+            });
+        }
+        Some(key)
+    }
+}
+
+/// Sizes to prepare without needing a renderer or spawning a worker.
+fn picker_card_sizes(output: Size<i32, Logical>, scale: f64) -> Vec<Size<i32, Physical>> {
+    let logical = Rectangle::from_size(
+        (
+            (f64::from(output.w) / scale).round() as i32,
+            (f64::from(output.h) / scale).round() as i32,
+        )
+            .into(),
+    );
+    let layout = crate::overview::layout(logical, crate::windows::WORK_AREA_TOP, &[0, 1], 0, &[]);
+    let mut sizes = Vec::new();
+    for card in layout.cards {
+        let rendered = (
+            (f64::from(card.settled.w) * scale).round() as i32,
+            (f64::from(card.settled.h) * scale).round() as i32,
+        )
+            .into();
+        sizes.push(rendered);
+        // At rest runtime derives the size from both rounded physical edges.
+        // This can differ from rounding width/height at fractional scale.
+        let width = ((card.rect.loc.x + card.rect.size.w) as f64 * scale).round()
+            - (card.rect.loc.x as f64 * scale).round();
+        let height = ((card.rect.loc.y + card.rect.size.h) as f64 * scale).round()
+            - (card.rect.loc.y as f64 * scale).round();
+        let at_rest = (width as i32, height as i32).into();
+        if at_rest != rendered {
+            sizes.push(at_rest);
+        }
+    }
+    sizes
 }
 
 /// Where a card rendered at `rendered` (plus `margin` shadow pixels on
@@ -912,6 +1059,245 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn card_workers_are_bounded_and_never_block_on_stalled_results() {
+        let mut wallpaper = Wallpaper::new();
+        let mut senders = Vec::new();
+        for index in 0..MAX_CARDS {
+            let (send, result) = std::sync::mpsc::channel();
+            senders.push(send);
+            wallpaper.card_pending.push(PendingCard {
+                key: (
+                    format!("stalled-{index}"),
+                    (1280, 800).into(),
+                    922,
+                    553,
+                    32,
+                    None,
+                ),
+                result,
+            });
+        }
+        for _ in 0..100 {
+            assert!(wallpaper
+                .request_card("", (1280, 800).into(), 32, (922, 553).into())
+                .is_some());
+        }
+        assert_eq!(wallpaper.card_pending.len(), MAX_CARDS);
+        assert!(wallpaper.cards.is_empty());
+        assert_eq!(senders.len(), MAX_CARDS);
+    }
+
+    #[test]
+    fn failed_and_disconnected_card_workers_release_their_budget_for_retry() {
+        let mut wallpaper = Wallpaper::new();
+        let key: CardKey = ("".into(), (64, 48).into(), 46, 28, 4, None);
+        let (send, result) = std::sync::mpsc::channel();
+        send.send(None).unwrap();
+        wallpaper.card_pending.push(PendingCard {
+            key: key.clone(),
+            result,
+        });
+        for index in 1..MAX_CARDS {
+            let (send, result) = std::sync::mpsc::channel();
+            drop(send);
+            wallpaper.card_pending.push(PendingCard {
+                key: (
+                    format!("disconnected-{index}"),
+                    (64, 48).into(),
+                    46,
+                    28,
+                    4,
+                    None,
+                ),
+                result,
+            });
+        }
+        assert_eq!(
+            wallpaper.request_card("", (64, 48).into(), 4, (46, 28).into()),
+            Some(key)
+        );
+        assert_eq!(
+            wallpaper.card_pending.len(),
+            1,
+            "failed slots permit one deduplicated retry"
+        );
+        assert!(wallpaper.cards.is_empty());
+    }
+
+    #[test]
+    fn async_card_result_reuses_cache_and_keys_the_crop() {
+        let mut wallpaper = Wallpaper::new();
+        let output = (64, 48).into();
+        let rendered = (46, 28).into();
+        let key = wallpaper.request_card("", output, 4, rendered).unwrap();
+        assert_eq!(wallpaper.card_pending.len(), 1);
+        assert!(
+            wallpaper.cards.is_empty(),
+            "first request schedules instead of rendering inline"
+        );
+        assert_eq!(
+            wallpaper.request_card("", output, 4, rendered),
+            Some(key.clone())
+        );
+        assert_eq!(
+            wallpaper.card_pending.len() + wallpaper.cards.len(),
+            1,
+            "duplicate requests share a job or its completed cache entry"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !wallpaper.cards.iter().any(|card| card.key == key) {
+            wallpaper.poll_cards();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "card worker did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for _ in 0..20 {
+            wallpaper.request_card("", output, 4, rendered);
+        }
+        assert!(
+            wallpaper.card_pending.is_empty(),
+            "settled/transition frames reuse the upload"
+        );
+        let changed = wallpaper.request_card("", output, 8, rendered).unwrap();
+        assert_ne!(key, changed, "moving the panel changes the wallpaper crop");
+        assert_eq!(wallpaper.card_pending.len(), 1);
+    }
+
+    #[test]
+    fn card_worker_preserves_the_synchronous_card_pixels() {
+        let mut wallpaper = Wallpaper::new();
+        let output = (64, 48).into();
+        let mut pixels = vec![0u8; 64 * 48 * 4];
+        for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[(index % 256) as u8, 40, 120, 255]);
+        }
+        let pixels: std::sync::Arc<[u8]> = pixels.into();
+        wallpaper.loaded.push(Loaded {
+            uri: "test-image".into(),
+            size: Some(output),
+            pixels: Some(pixels.clone()),
+            buffer: None,
+            cards_prewarmed: false,
+        });
+        wallpaper
+            .request_card("test-image", output, 4, (46, 28).into())
+            .unwrap();
+        let job = wallpaper.card_pending.pop().unwrap();
+        let actual = job
+            .result
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        let scale = 46.0 / 64.0;
+        let expected = tuna_wallpaper::card(
+            Some((&pixels, 64, 48)),
+            (0, 4, 64, 44),
+            [0x14, 0x17, 0x1c],
+            46,
+            28,
+            30.0 * scale,
+            tuna_wallpaper::Shadow {
+                dy: 4.0 * scale,
+                blur: 16.0 * scale,
+                spread: 4.0 * scale,
+                alpha: 0.2,
+            },
+        )
+        .unwrap();
+        assert_eq!(actual.pixels, expected.pixels);
+        assert_eq!(
+            (actual.width, actual.height, actual.margin),
+            (expected.width, expected.height, expected.margin)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual host timing, not a GNOME performance qualification"]
+    fn measure_cold_card_thread_occupancy() {
+        let output = (1280, 800).into();
+        let pixels: std::sync::Arc<[u8]> = vec![80u8; 1280 * 800 * 4].into();
+        let scale = 922.0 / 1280.0;
+        let started = std::time::Instant::now();
+        let synchronous = tuna_wallpaper::card(
+            Some((&pixels, 1280, 800)),
+            (0, 32, 1280, 768),
+            [20, 23, 28],
+            922,
+            553,
+            30.0 * scale,
+            tuna_wallpaper::Shadow {
+                dy: 4.0 * scale,
+                blur: 16.0 * scale,
+                spread: 4.0 * scale,
+                alpha: 0.2,
+            },
+        )
+        .unwrap();
+        let synchronous_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut wallpaper = Wallpaper::new();
+        wallpaper.loaded.push(Loaded {
+            uri: "timing-image".into(),
+            size: Some(output),
+            pixels: Some(pixels),
+            buffer: None,
+            cards_prewarmed: false,
+        });
+        let started = std::time::Instant::now();
+        wallpaper
+            .request_card("timing-image", output, 32, (922, 553).into())
+            .unwrap();
+        let dispatch_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let job = wallpaper.card_pending.pop().unwrap();
+        let asynchronous = job
+            .result
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let ready_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(synchronous.pixels, asynchronous.pixels);
+        println!("cold card: synchronous_event_thread_ms={synchronous_ms:.3} async_dispatch_event_thread_ms={dispatch_ms:.3} async_pixels_ready_ms={ready_ms:.3} card_bytes={}", asynchronous.pixels.len());
+    }
+
+    #[test]
+    fn desktop_prewarms_picker_sizes_at_native_and_fractional_scale() {
+        for (scale, physical, expected) in [
+            (1.0f64, [1280, 800], vec![(922, 553), (867, 520)]),
+            (
+                1.25,
+                [1600, 1000],
+                vec![(1153, 691), (1152, 691), (1084, 650)],
+            ),
+        ] {
+            let actual: std::collections::HashSet<_> =
+                picker_card_sizes((physical[0] as i32, physical[1] as i32).into(), scale)
+                    .into_iter()
+                    .map(|size| (size.w, size.h))
+                    .collect();
+            assert_eq!(actual, expected.into_iter().collect(), "scale {scale}");
+        }
+    }
+
+    #[test]
+    fn card_requests_reject_oversized_layouts_before_spawning() {
+        let mut wallpaper = Wallpaper::new();
+        assert!(wallpaper
+            .request_card("", (1280, 800).into(), 32, (i32::MAX, i32::MAX).into())
+            .is_none());
+        assert!(wallpaper
+            .request_card("", (0, 800).into(), 32, (922, 553).into())
+            .is_none());
+        assert!(
+            wallpaper
+                .request_card("", (1, 800).into(), 32, (30_000_000, 1).into())
+                .is_none(),
+            "shadow area also stays bounded for extreme aspect ratios"
+        );
+        assert!(wallpaper.card_pending.is_empty());
     }
 
     #[test]
