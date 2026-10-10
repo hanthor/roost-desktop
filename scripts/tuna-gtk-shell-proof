@@ -4327,11 +4327,15 @@ for spec in 'XF86MonBrightnessUp:550' 'XF86MonBrightnessDown:500' 'XF86MonBright
     [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
 done
 echo 1000 >"$BACKLIGHT/brightness"
-fkey_tap Super_L ffc0 || fail G-MONITOR-BRIGHTNESS-KEYS "Super+F3 tap failed"
-end=$(($(date +%s) + 10))
+# Cycle through the default chord like up/down above: the custom Super+F3
+# this step used to tap is no longer bound (see the loop comment).
+end=$(($(date +%s) + 15))
+until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do
+    xdotool key "shift+XF86MonBrightnessCycle"
+    sleep 1
+done
 # GNOME normalized zero maps to the hardware minimum, not a powered-off
 # panel: Mutter's sysfs floor is max(1, max_brightness / 100).
-until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
 [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || fail G-MONITOR-BRIGHTNESS-KEYS "cycle did not wrap to the GNOME hardware minimum"
 for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
     gsettings reset org.gnome.shell.keybindings "$key"
