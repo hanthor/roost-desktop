@@ -640,7 +640,9 @@ jobs:
           name: scroll-proof-shots
           path: /tmp/tuna-docs/scroll
       - run: shellcheck scripts/tuna-docs-shots
-      - run: scripts/tuna-docs-shots collect /tmp/tuna-docs/journey /tmp/tuna-docs/app /tmp/tuna-docs/scroll --dest /tmp/tuna-docs/shots && ls /tmp/tuna-docs/shots | wc -l | grep -q 7
+      - run: |
+          scripts/tuna-docs-shots collect /tmp/tuna-docs/journey /tmp/tuna-docs/app /tmp/tuna-docs/scroll --dest /tmp/tuna-docs/shots
+          python3 -c 'from pathlib import Path; assert len(list(Path("/tmp/tuna-docs/shots").iterdir())) == 7'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docs-shots
