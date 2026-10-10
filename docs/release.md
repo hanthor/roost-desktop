@@ -24,9 +24,11 @@ not provide Marlin or physical hardware qualification.
    closure plus explicit runtime floors. Install it on the selected target
    with apt, retaining package/hash/distro dependency receipts and the
    installed GTK control proof; an extracted/debug binary is insufficient.
-   Verify the artifact: install it on a clean supported system without
-   dependencies pre-installed, confirm the login screen lists Tuna Desktop, and
-   confirm every binary's `--version` matches the tag.
+   Verify the artifact: `scripts/check-deb-clean-install` requires a
+   root-owned archive with the GTK shell and installs it on a pristine
+   `ubuntu:26.04` container with only its declared dependencies; then
+   confirm the login screen lists Tuna Desktop on a real install and that
+   every binary's `--version` matches the tag.
 7. Capture the demo media from the same tag:
    `scripts/tuna-capture --artifacts walkthrough-media` — records the
    six-feature core tour (clip plus still per segment) and checks the

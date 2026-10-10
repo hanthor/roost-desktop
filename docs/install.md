@@ -10,9 +10,11 @@
 
 ## From the Debian-format package
 
-The preferred GTK shell is required for Debian/Ubuntu production support.
-The first installed-package CI target is Ubuntu 26.04 amd64; actual package
-and control proof remains pending. Packages must be built against their target
+The package ships the preferred GTK shell (`tuna-shell-gtk`) beside the
+compositor, which selects it ahead of the legacy `tuna-shell-host`. The
+first installed-package CI target is Ubuntu 26.04 amd64: CI installs the
+package on a pristine `ubuntu:26.04` container and runs the installed GTK
+session proof against it. Packages must be built against their target
 distribution's libraries. The required gtk4-layer-shell version is at least
 1.1; [Debian 13 stable provides 1.0.4](https://packages.debian.org/trixie/libgtk4-layer-shell0),
 so that target still needs a genuine packaged backport and separate installed
