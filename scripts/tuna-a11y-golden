@@ -43,10 +43,20 @@ def stable(name):
     return name
 
 
+def role(name):
+    # Newer AT-SPI reports GNOME 51's `button` where the older stack that
+    # recorded the goldens reported `push button` (see
+    # scripts/tuna-a11y-baseline); canonicalize so the goldens hold on
+    # either stack. Dropped or renamed controls still fail the check.
+    if name == "button":
+        return "push button"
+    return name
+
+
 def normalize(path):
     with open(path, encoding="utf-8") as fh:
         nodes = json.load(fh)
-    return [f"{n['role']}: {stable(n['name'])}" for n in nodes
+    return [f"{role(n['role'])}: {stable(n['name'])}" for n in nodes
             if n.get("showing") and n.get("name") and n.get("role") != "label"]
 
 
