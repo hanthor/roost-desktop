@@ -11,3 +11,14 @@ This implements menu settings and visibility. It does not implement missing magn
 `scripts/tuna-gtk-accessibility-proof GTK_TEST_EXECUTABLE SOURCE_COMMIT ARTIFACT_DIRECTORY` runs the ignored `accessibility::tests::live_menu_and_focus_settings` test using actual GTK widgets, settings callbacks, and timers. Each run owns a mode 0700 runtime directory, private session and accessibility buses, a free Xvfb display, and memory settings, and records binary/source identity plus GTK version. A persistent guard queries the private bus for its daemon and registry processes, retains pidfds before the test starts, and verifies their exit before the runtime directory is removed. Query failure refuses proof. The dedicated focus schema fixture allows older hosts to exercise the new key without changing installed schemas or the user's settings.
 
 Scope: source GTK widget behavior on the recorded host. Installed Wayland shell pixels, actual keyboard/pointer input, external toolkit clients, native output sessions, and paired GNOME behavior still need qualification. Pure policy tests and this focused source proof alone do not close P-A11Y-05.
+
+### Local receipt (2026-10-10)
+
+Exact implementation source `88aa154950603ca5d60efc0d678b5a349c557fcc` was compiled after a workspace package clean under the shared build-and-freeze guard, with one build job and development/test debug info disabled. The frozen test executable is `/tmp/tuna-v1-a11y-qualified-binaries/gtk-tests`, SHA256 `d4885c49ee1e61e0e9f938622af45aab276a977a64f71e2c0b6b799af1827cf7`.
+
+- All nonignored GTK unit tests: **122 passed**, two graphical tests deliberately ignored by this invocation. Log: `/tmp/tuna-v1-a11y-qualified-unit-tests.log`.
+- Actual graphical accessibility test: **1 passed** in 18.82 seconds. Artifacts: `/tmp/tuna-v1-a11y-proof-qualified`. Checks include each available boolean row's setting-to-widget and widget-to-setting directions, indicator visibility, ten-row structure, Large Text reset/1.25, one-second/default/forever focus, existing visible windows, inherited transient visibility, and pointer-style focus clearing.
+- Strict GTK lint: `cargo clippy -p tuna-shell-gtk --all-targets -- -D warnings` passed. Log: `/tmp/tuna-v1-a11y-clippy.log`.
+- Shellcheck, shell syntax, Rust formatting, and the 429-key settings inventory check passed.
+
+The manifest records host GTK **4.14.5**, private display/session/accessibility bus identities and mode 0700 runtime. `owned-accessibility.json` confirms retained pidfds and verified exit for the private registry and bus daemon; the runtime directory was removed. The newer native GTK property branch is source-reviewed and compiled but was not exercised on this host. The remaining qualification scope above applies; this is a partial P-A11Y-05 receipt.
