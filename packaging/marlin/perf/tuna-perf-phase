@@ -434,12 +434,87 @@ def gnome_trace(action, index):
         return dict(index=index, data=base64.b64encode(raw).decode("ascii"))
 
 
+def tuna_process():
+    """Bind one live fixture process to its original installed executable."""
+    uid = pwd.getpwnam('tuna-test').pw_uid
+    found = []
+    installed = kernel_file_digest('/usr/bin/tuna-compositor')
+    for root in Path('/proc').iterdir():
+        if not root.name.isdecimal():
+            continue
+        try:
+            if root.stat().st_uid != uid or os.readlink(root / 'exe') != '/usr/bin/tuna-compositor':
+                continue
+            before = process_start(int(root.name))
+            live = (root / 'exe').stat()
+            if (live.st_dev, live.st_ino) != (installed['device'], installed['inode']):
+                raise ValueError('live compositor differs from installed payload')
+            environment = (root / 'environ').read_bytes()
+            if len(environment) > 128 * 1024 or b'TUNA_PERF_TRACE=1' not in environment.split(b'\0'):
+                raise ValueError('native fixture tracing disabled')
+            if before != process_start(int(root.name)):
+                raise ValueError('compositor process changed')
+            found.append({'pid': int(root.name), 'uid': uid, 'start_ticks': before,
+                          'path': '/usr/bin/tuna-compositor', 'sha256': installed['sha256'],
+                          'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                          'trace_enabled': True})
+        except FileNotFoundError:
+            continue
+    if len(found) != 1:
+        raise ValueError('expected one live Tuna fixture compositor')
+    return found[0]
+
+
+def tuna_journal(identity, cursor=None):
+    from tuna_overview_receipts import journal_rows, MAX_BYTES
+    import tempfile
+    command = ['journalctl', '--no-pager', '--output=json', '--boot',
+               '_PID=' + str(identity['pid']), '--grep=^tuna-perf-input: ']
+    if cursor is not None:
+        command += ['--after-cursor=' + cursor]
+    subprocess.run(['journalctl', '--sync'], timeout=10, check=True, stdout=subprocess.DEVNULL)
+    with tempfile.TemporaryFile() as output:
+        subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL,
+                       timeout=10, check=True)
+        output.seek(0)
+        raw = output.read(MAX_BYTES + 1)
+    if identity != tuna_process():
+        raise ValueError('compositor changed during journal acquisition')
+    rows, last = journal_rows(raw, identity, cursor)
+    return rows, last, {'data': base64.b64encode(raw).decode('ascii'),
+                        'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def tuna_overview(action):
+    marker = Path('/run/tuna-perf-overview.json')
+    identity = tuna_process()
+    image = reference_image()
+    if action == 'start':
+        rows, cursor, source = tuna_journal(identity)
+        ids = [row['id'] for row in rows]
+        if cursor is None:
+            # A journal cursor must precede every measured action; no empty or
+            # delayed journal fallback to a host/QMP timestamp is accepted.
+            raise ValueError('missing native pre-workload journal boundary')
+        receipt = {'process': identity, 'reference_image': image,
+                   'after_id': max(ids, default=0), 'cursor': cursor,
+                   'boundary_journal_sha256': source['sha256']}
+        write_marker(marker, receipt, 0)
+        return receipt
+    original = read_marker(marker, 0)
+    if identity != original['process'] or image != original['reference_image']:
+        raise ValueError('native process/reference changed during workload')
+    rows, _, source = tuna_journal(identity, original['cursor'])
+    return dict(original, events=rows, journal_source=source)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("clock", "notify", "frames", "reference-image", "stock-reference",
                                           "gnome-trace-start", "gnome-trace-stop", "gnome-trace-read",
                                           "gnome-trace-failed-stop", "gnome-trace-failed-stop-read",
-                                           "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read", "kernel-discovery-read"))
+                                           "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read", "kernel-discovery-read",
+                                          "tuna-overview-start", "tuna-overview-stop"))
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()
     result = {}
@@ -462,6 +537,8 @@ def main():
             raise SystemExit(1) from None
     if args.action.startswith("kernel-"):
         result["kernel_trace"] = kernel_trace(args.action.removeprefix("kernel-"), args.index)
+    if args.action.startswith("tuna-overview-"):
+        result["tuna_overview"] = tuna_overview(args.action.removeprefix("tuna-overview-"))
     result["boottime_s"] = time.clock_gettime(time.CLOCK_BOOTTIME)
     print(json.dumps(result))
 

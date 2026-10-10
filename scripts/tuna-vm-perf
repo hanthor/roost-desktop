@@ -21,6 +21,7 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 sys.path.insert(0, str(HERE / "lib"))
 from gnome_reference import validate_image, validate_reference, same_reference, trace_required, idle_pss, idle_memory, read_image
+from tuna_overview_receipts import validate_capture as validate_tuna_overview
 from vm_guest_agent import GuestAgent  # noqa: E402
 from perf_trace_diagnostics import decode as decode_trace_failure, MAX_BYTES as TRACE_FAILURE_BYTES
 from gnome_failed_capture import validate_receipt as validate_failed_capture, validate_chunk as validate_failed_chunk
@@ -34,7 +35,7 @@ def guest_probe(agent, action, index=None, out=None):
                       "gnome-trace-stop", "gnome-trace-read",
                       "gnome-trace-failed-stop", "gnome-trace-failed-stop-read",
                       "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read",
-                      "kernel-discovery-read"):
+                      "kernel-discovery-read", "tuna-overview-start", "tuna-overview-stop"):
         raise ValueError("unsupported performance probe")
     arguments = [action]
     if action == "notify":
@@ -401,6 +402,48 @@ def changed(before, after):
     return sum(abs(x-y) > 24 for x, y in zip(before[32*1280*3:], after[32*1280*3:])) > 1280*800*3*.10
 
 
+def overview_response_summary(observations):
+    """A broad pixel change is first response, not completed-card evidence."""
+    response = distribution([row["upper_s"] for row in observations])
+    return {
+        # Preserve the legacy field as a first-response alias for old reports.
+        "overview_observed_upper_s": response,
+        "overview_first_response_upper_s": response,
+        "overview_card_complete_scanout": {
+            "status": "unavailable",
+            "qualifies_completed_overview": False,
+            "reason": "native card readiness and associated primary presentation receipts not acquired",
+            "pre_input_preparation": "unobserved",
+            "startup_accounting": "unchanged whole-run CPU/RSS/PSS samples include preparation",
+        },
+    }
+
+
+def retain_tuna_overview(agent, out, original, image, payload_path, selection_path, meta):
+    """Retain raw native evidence; a refused acquisition never qualifies pixels."""
+    unavailable = overview_response_summary([])['overview_card_complete_scanout']
+    try:
+        receipt = guest_probe(agent, 'tuna-overview-stop')['tuna_overview']
+        (out / 'tuna-overview-native.json').write_text(json.dumps(receipt, indent=2))
+        payload = json.loads(Path(payload_path).read_text())
+        selection = json.loads(Path(selection_path).read_text())
+        image_ids = [item.split('=', 1)[1] for item in meta if item.startswith('fixture_image_id=')]
+        if len(image_ids) != 1:
+            raise ValueError('missing original fixture image identity')
+        if any(receipt.get(field) != original.get(field) for field in ('after_id', 'cursor', 'boundary_journal_sha256')):
+            raise ValueError('workload boundary changed')
+        result = validate_tuna_overview(receipt, original['process'], image,
+            payload['required_members']['usr/bin/tuna-compositor']['sha256'],
+            selection['head_sha'], image_ids[0])
+        result['input_to_card_complete_scanout_s'] = distribution([
+            row['input_to_card_complete_scanout_s'] for row in result['samples']])
+        result['opening_input_to_card_complete_scanout_s'] = distribution([
+            row['input_to_card_complete_scanout_s'] for row in result['samples'] if row['action'] == 'overview-open'])
+        return result
+    except (ValueError, TypeError, KeyError, OSError, RuntimeError, RecursionError):
+        return dict(unavailable, status='refused', reason='native acquisition or original identity validation refused')
+
+
 def main():
     from perf_vm_lifetime import Handoff, cleanup_owned_vm
     ap = argparse.ArgumentParser()
@@ -408,6 +451,8 @@ def main():
     ap.add_argument("--desktop", required=True, choices=("gnome", "tuna"))
     ap.add_argument("--gnome-profile", choices=("diagnostic", "stock"), default="diagnostic")
     ap.add_argument("--reference-image", help="original host-retained image receipt; required by paired CI")
+    ap.add_argument("--tuna-payload", help="original package member hash receipt for native overview qualification")
+    ap.add_argument("--tuna-selection", help="original successful MAIN source/artifact selection receipt")
     ap.add_argument("--out", required=True)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--meta", action="append", default=[])
@@ -429,6 +474,8 @@ def main():
     agent = None
     gnome_trace_active = False
     gnome_trace_summary = None
+    tuna_overview_original = None
+    tuna_overview_summary = None
     primary = None
     try:
         vm, qmp_path, serial_path, kvm, agent_path = lane.boot(
@@ -485,6 +532,13 @@ def main():
             guest_probe(agent, "gnome-trace-start", out=out)
             gnome_trace_active = True
             time.sleep(1)  # Preserve pre-input scopes after the actual drained boundary.
+        if args.desktop == 'tuna':
+            try:
+                tuna_overview_original = guest_probe(agent, 'tuna-overview-start')['tuna_overview']
+                (out / 'tuna-overview-boundary.json').write_text(json.dumps(tuna_overview_original, indent=2))
+            except (ValueError, TypeError, KeyError, RuntimeError):
+                tuna_overview_summary = dict(overview_response_summary([])['overview_card_complete_scanout'],
+                    status='refused', reason='native original process/workload boundary unavailable')
         phases["workload_start"] = time.clock_gettime(time.CLOCK_BOOTTIME)
         for index in range(20):
             before = frame(qmp, scratch / "before.ppm")
@@ -498,7 +552,8 @@ def main():
                 if changed(before, after):
                     observations.append({"index": index, "action": "overview-open" if index % 2 == 0 else "overview-close",
                                          "lower_s": previous_start-start, "upper_s": poll_end-start,
-                                         "capture_s": poll_end-poll_start})
+                                         "capture_s": poll_end-poll_start,
+                                         "scope": "broad-first-response", "card_completion_verified": False})
                     qmp.frame(str(out / f"overview-{index:02d}.png"))
                     break
                 previous_start = poll_start
@@ -506,6 +561,10 @@ def main():
             else:
                 raise RuntimeError(f"overview input {index} produced no broad visible response")
             time.sleep(1)
+        if tuna_overview_original is not None:
+            tuna_overview_summary = retain_tuna_overview(agent, out, tuna_overview_original,
+                reference_image, args.tuna_payload, args.tuna_selection, args.meta)
+            (out / 'tuna-overview-acquisition.json').write_text(json.dumps(tuna_overview_summary, indent=2))
         if gnome_trace_active:
             metadata = guest_probe(agent, "gnome-trace-stop", out=out)["gnome_trace"]
             gnome_trace_active = False
@@ -565,14 +624,15 @@ def main():
                   "drm_memory": drm_memory_summary(samples),
                   "presentation_cadence": pacing,
                   "gnome_overview_sysprof": gnome_trace_summary,
-                  "overview_observed_upper_s":distribution([s["upper_s"] for s in observations]),
-                  "limitations":["QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
+                  **overview_response_summary(observations),
+                  **({'overview_card_complete_scanout': tuna_overview_summary} if tuna_overview_summary is not None else {}),
+                  "limitations":["QMP observations measure broad first response only. A changed shell/dark background can precede async wallpaper cards; these observations do not qualify completed overview latency.",
                                  "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
                                  "RSS sums process resident sets and can double-count shared pages. PSS covers the test UID and excludes the observer and its descendants; root/GDM shared services are outside this scope.",
                                  "App search followed by fixed eight-second waits does not measure or prove application launch/readiness.",
                                  "Whole-run summaries include startup and workload. Idle PSS and CPU uses guest-clock markers and only intervals wholly within the idle phase.",
                                  "DRM memory is optional driver-provided client accounting, not unique physical GPU allocation; unavailable samples are explicit.",
-                                 "Notification IDs prove service acceptance, not notification input-to-frame latency. Presentation cadence is a native client workload; compositor input tracing, multiple cold/warm boots and 24-hour soak remain open.",
+                                 "Notification IDs prove service acceptance, not notification input-to-frame latency. Tuna native receipts cover current-layout wallpaper cards at primary scanout, not animation or GTK completion; equivalent GNOME card-readiness evidence, multiple cold/warm boots and 24-hour soak remain open.",
                                  "No release threshold or claim of within-10-percent parity is introduced."]}
         (out / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))

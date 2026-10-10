@@ -182,7 +182,9 @@ struct PickerWindow {
 }
 
 pub struct ScreenshotUi {
-    window: gtk::Window,
+    window: RefCell<Option<gtk::Window>>,
+    app: gtk::Application,
+    overlay: gtk::Overlay,
     canvas: gtk::DrawingArea,
     fixed: gtk::Fixed,
     panel: gtk::Box,
@@ -203,6 +205,7 @@ pub struct ScreenshotUi {
     shoot_window: Rc<dyn Fn()>,
     notify: Notify,
     recorder: Rc<Recorder>,
+    move_pointer: Rc<dyn Fn((f64, f64))>,
 }
 
 fn icon_label_button(icon: &str, label: &str) -> gtk::ToggleButton {
@@ -225,20 +228,8 @@ impl ScreenshotUi {
         shoot_window: Rc<dyn Fn()>,
         notify: Notify,
         recorder: Rc<Recorder>,
+        move_pointer: Rc<dyn Fn((f64, f64))>,
     ) -> Rc<Self> {
-        let window = gtk::Window::new();
-        window.set_application(Some(app));
-        window.add_css_class("tuna-screenshot-ui");
-        window.set_title(Some("Screenshot"));
-        window.init_layer_shell();
-        window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(tuna_shell_control::SCREENSHOT_NAMESPACE));
-        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-            window.set_anchor(edge, true);
-        }
-        window.set_exclusive_zone(-1);
-        window.set_keyboard_mode(KeyboardMode::Exclusive);
-
         let canvas = gtk::DrawingArea::new();
         canvas.set_accessible_role(gtk::AccessibleRole::Img);
         canvas.set_hexpand(true);
@@ -247,7 +238,6 @@ impl ScreenshotUi {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&canvas));
         overlay.add_overlay(&fixed);
-        window.set_child(Some(&overlay));
 
         // The panel.
         let panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -323,7 +313,9 @@ impl ScreenshotUi {
         fixed.put(&close, 0.0, 0.0);
 
         let ui = Rc::new(Self {
-            window,
+            window: RefCell::new(None),
+            app: app.clone(),
+            overlay: overlay.clone(),
             canvas,
             fixed,
             panel,
@@ -341,6 +333,7 @@ impl ScreenshotUi {
             shoot_window,
             notify,
             recorder,
+            move_pointer,
         });
 
         {
@@ -497,12 +490,15 @@ impl ScreenshotUi {
                             ui.selection.set(Some(rect));
                             ui.describe_selection();
                             ui.canvas.queue_draw();
+                            (ui.move_pointer)(
+                                selection.cursor(modifiers.contains(gdk::ModifierType::ALT_MASK)),
+                            );
                         } else if !modifiers.intersects(
                             gdk::ModifierType::ALT_MASK
                                 | gdk::ModifierType::CONTROL_MASK
                                 | gdk::ModifierType::SHIFT_MASK,
                         ) {
-                            ui.window.child_focus(match direction {
+                            ui.overlay.child_focus(match direction {
                                 Direction::Left => gtk::DirectionType::Left,
                                 Direction::Right => gtk::DirectionType::Right,
                                 Direction::Up => gtk::DirectionType::Up,
@@ -515,7 +511,7 @@ impl ScreenshotUi {
                 glib::Propagation::Stop
             });
         }
-        ui.window.add_controller(keys);
+        ui.overlay.add_controller(keys);
         ui.set_mode(Mode::Selection);
         ui
     }
@@ -594,7 +590,12 @@ impl ScreenshotUi {
     }
 
     fn open_in(self: &Rc<Self>, cast: bool) {
-        if self.window.is_visible() {
+        if self
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.is_visible())
+        {
             return;
         }
         let dir = glib::user_runtime_dir();
@@ -735,7 +736,7 @@ impl ScreenshotUi {
             .as_ref()
             .map(|t| (t.width(), t.height()))
             .unwrap_or((1280, 800));
-        let monitor = WidgetExt::display(&self.window)
+        let monitor = WidgetExt::display(&self.canvas)
             .monitors()
             .item(0)
             .and_then(|m| m.downcast::<gdk::Monitor>().ok())
@@ -765,11 +766,74 @@ impl ScreenshotUi {
         );
         self.set_cast(cast);
         self.set_mode(self.mode.get());
-        self.window.present();
+        let window = self
+            .window
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.new_window());
+        *self.window.borrow_mut() = Some(window.clone());
+        window.present();
+    }
+
+    fn new_window(self: &Rc<Self>) -> gtk::Window {
+        let window = gtk::Window::new();
+        window.set_application(Some(&self.app));
+        window.add_css_class("tuna-screenshot-ui");
+        window.set_title(Some("Screenshot"));
+        window.init_layer_shell();
+        window.set_layer(Layer::Overlay);
+        window.set_namespace(Some(tuna_shell_control::SCREENSHOT_NAMESPACE));
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            window.set_anchor(edge, true);
+        }
+        window.set_exclusive_zone(-1);
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+
+        window.set_child(Some(&self.overlay));
+        // The layer-shell `closed` event becomes an xdg-toplevel close
+        // request. Retire that surface through the same path as Escape.
+        let weak = Rc::downgrade(self);
+        window.connect_close_request(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        // GTK's destroy signal waits for the final object reference, while
+        // direct GtkWindow.destroy removes its native surface immediately.
+        // Retire on unrealize so the held reference cannot keep a dead
+        // window in the slot. Finish destruction after signal emission.
+        let weak = Rc::downgrade(self);
+        window.connect_unrealize(move |window| {
+            if let Some(ui) = weak.upgrade() {
+                let current = ui
+                    .window
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|current| current == window);
+                if current {
+                    ui.window.borrow_mut().take();
+                    window.set_child(None::<&gtk::Widget>);
+                    ui.close();
+                    let retired = window.clone();
+                    glib::idle_add_local_once(move || retired.destroy());
+                }
+            }
+        });
+        window
     }
 
     fn close(&self) {
-        self.window.set_visible(false);
+        // Remove the retired toplevel before GTK's AT-SPI root can
+        // return its unrealized context for a stale child index. Content
+        // and shortcuts persist; each opening gets a fresh layer surface.
+        let retired = self.window.borrow_mut().take();
+        if let Some(window) = retired {
+            window.set_child(None::<&gtk::Widget>);
+            window.destroy();
+        }
         self.frozen.borrow_mut().take();
         for old in self.windows.borrow_mut().drain(..) {
             self.fixed.remove(&old.button);
@@ -1006,6 +1070,70 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a supervised GTK test process inside a Wayland layer-shell session"]
+    fn external_close_and_destroy_retire_the_screenshot_window() {
+        let _control = crate::attach_control().expect("supervised shell control handshake");
+        gtk::init().expect("GTK display");
+        let app = gtk::Application::builder()
+            .application_id("org.tuna.ScreenshotLifecycleTest")
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let notify: Notify = Rc::new(|_, _| {});
+        let ui = ScreenshotUi::new(
+            &app,
+            Rc::new(|| {}),
+            notify.clone(),
+            Recorder::new(notify),
+            Rc::new(|_| {}),
+        );
+        let context = glib::MainContext::default();
+        let mapped = |window: &gtk::Window| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !window.is_mapped() && std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(window.is_mapped(), "screenshot layer must map");
+        };
+        ui.show(false);
+        let first = ui.window.borrow().clone().unwrap();
+        mapped(&first);
+        first.close();
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(
+            ui.window.borrow().is_none(),
+            "close-request must retire window"
+        );
+        assert!(ui.overlay.parent().is_none());
+
+        ui.show(false);
+        let second = ui.window.borrow().clone().unwrap();
+        assert_ne!(first, second, "reopen must create a fresh layer window");
+        mapped(&second);
+        second.destroy();
+        assert!(
+            ui.window.borrow().is_none(),
+            "direct destroy must retire window"
+        );
+        assert!(ui.overlay.parent().is_none());
+
+        ui.show(false);
+        let third = ui.window.borrow().clone().unwrap();
+        assert_ne!(second, third);
+        mapped(&third);
+        ui.close();
+        if let Some(path) = std::env::var_os("TUNA_SCREENSHOT_LIFECYCLE_RECEIPT") {
+            std::fs::write(
+                path,
+                "external close, direct destroy and fresh reopen passed\n",
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn the_first_selection_is_a_centred_quarter() {

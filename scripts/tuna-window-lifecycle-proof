@@ -1,0 +1,282 @@
+#!/usr/bin/python3
+"""Actual nested rendering/lifetime proof; requires built binaries + Xvfb.
+
+Run under dbus-run-session. --bin-dir points to a Cargo target/debug directory.
+Uses a private display, settings, runtime directory, and manual animation clock.
+This is local rendering evidence, not a GNOME paired benchmark or v1 verdict.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import shutil
+import hashlib
+import signal
+import select
+import gi
+from gi.repository import Gio, GLib
+import time
+from PIL import Image
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument("--bin-dir", type=Path, required=True)
+p.add_argument("--artifacts", type=Path, required=True)
+p.add_argument("--display", default=":95")
+a = p.parse_args()
+root = Path(__file__).resolve().parent.parent
+art = a.artifacts.resolve()
+art.mkdir(parents=True, exist_ok=True)
+runtime = art / "runtime"
+runtime.mkdir(mode=0o700, exist_ok=True)
+os.chmod(runtime, 0o700)
+state = art / "state.json"
+clock = art / "clock"
+command = art / "command.json"
+clock.write_text("0\n")
+(art / "assertions.txt").unlink(missing_ok=True)
+state.unlink(missing_ok=True)
+command.unlink(missing_ok=True)
+env = dict(os.environ, DISPLAY=a.display, XDG_RUNTIME_DIR=str(runtime),
+           XDG_CONFIG_HOME=str(art / "config"), GSETTINGS_BACKEND="keyfile",
+           TUNA_COMPOSITOR_STATE=str(state), TUNA_ANIMATION_CLOCK=str(clock),
+           TUNA_XWAYLAND="0", LIBGL_ALWAYS_SOFTWARE="1", ADW_DISABLE_PORTAL="1", GSK_RENDERER="cairo", TUNA_LIFECYCLE_COMMAND=str(command))
+# Freeze the tested binaries so another worktree's build cannot change this run.
+frozen = art / "bin"
+frozen.mkdir(exist_ok=True)
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream,"sha256").hexdigest()
+binaries = {}
+for name in ("tuna-compositor","tuna-shell-gtk"):
+    source = a.bin_dir.resolve() / name
+    dest = frozen / name
+    shutil.copy2(source,dest)
+    binaries[name] = {"source_path":str(source),"sha256":digest(dest)}
+manifest = {
+    "source_revision":subprocess.check_output(["git","rev-parse","HEAD"],cwd=root,text=True).strip(),
+    "source_dirty":bool(subprocess.check_output(["git","status","--porcelain"],cwd=root,text=True).strip()),
+    "binaries":binaries,
+    "proof_sha256":digest(Path(__file__).resolve()),
+    "client_sha256":digest(root / "scripts/lib/tuna-window-lifecycle-client.py"),
+    "backend":"winit/Xvfb/llvmpipe", "gnome_comparison":False,
+}
+(art / "manifest.json").write_text(json.dumps(manifest,indent=2))
+processes = []
+logs = []
+def spawn(args, name, extra=None):
+    log = (art / f"{name}.log").open("w")
+    logs.append(log)
+    proc = subprocess.Popen(args, env=env | (extra or {}), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    processes.append(proc)
+    return proc
+def wait(check, label):
+    end = time.monotonic() + 25
+    while time.monotonic() < end:
+        try:
+            data = json.loads(state.read_text())
+            if check(data):
+                (art / f"{label}.json").write_text(json.dumps(data, indent=2))
+                return data
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+        time.sleep(.05)
+    raise AssertionError(f"timed out: {label}; see {art}")
+def screenshot(name):
+    time.sleep(.1)
+    path = art / f"{name}.png"
+    subprocess.run(["scrot", str(path)], env=env, check=True)
+    return Image.open(path).convert("RGB")
+def move(ms):
+    temp = art / "clock.tmp"
+    temp.write_text(str(ms))
+    temp.replace(clock)
+def action(name, generation):
+    temp = art / "command.tmp"
+    temp.write_text(json.dumps(dict(action=name, generation=generation)))
+    temp.replace(command)
+def require_owned_cleanup(cleanup):
+    if not cleanup["runtime_removed"] or not cleanup["accessibility_processes_stopped"] or not cleanup["accessibility_identity_verified"]:
+        raise AssertionError("owned proof session cleanup failed")
+
+def expected_missing_accessibility_owner(name, remote_error):
+    return name == "org.a11y.atspi.Registry" and remote_error == "org.freedesktop.DBus.Error.NameHasNoOwner"
+
+success = False
+owned_pidfds = []
+accessibility = None
+try:
+    # Private session buses alone do not isolate the fixed AT-SPI runtime socket.
+    launcher = spawn(["/usr/libexec/at-spi-bus-launcher","--launch-immediately"],"atspi")
+    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION,None)
+    deadline = time.monotonic()+10
+    while True:
+        try:
+            address = session_bus.call_sync("org.a11y.Bus","/org/a11y/bus","org.a11y.Bus","GetAddress",None,None,Gio.DBusCallFlags.NO_AUTO_START,2000,None).unpack()[0]
+            break
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.1)
+    assert str(runtime) in address, "accessibility bus escaped private runtime"
+    env["AT_SPI_BUS_ADDRESS"] = address
+    accessibility = Gio.DBusConnection.new_for_address_sync(address,Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,None,None)
+    bus_pid = accessibility.call_sync("org.freedesktop.DBus","/org/freedesktop/DBus","org.freedesktop.DBus","GetConnectionUnixProcessID",GLib.Variant("(s)",("org.freedesktop.DBus",)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0]
+    owned_pidfds.append(os.pidfd_open(bus_pid))
+    manifest["session_isolation"] = {
+        "runtime_directory":str(runtime), "runtime_mode":oct(runtime.stat().st_mode & 0o777),
+        "session_bus":env.get("DBUS_SESSION_BUS_ADDRESS"), "accessibility_bus":address,
+        "accessibility_launcher_pid":launcher.pid,"accessibility_bus_pid":bus_pid,
+    }
+    (art / "manifest.json").write_text(json.dumps(manifest,indent=2))
+    # Refuse an existing display; never point the proof at a user's session.
+    if Path(f"/tmp/.X11-unix/X{a.display.lstrip(':')}").exists():
+        raise RuntimeError("display already in use; choose a private unused display")
+    spawn(["Xvfb", a.display, "-screen", "0", "1280x800x24"], "xvfb")
+    for _ in range(100):
+        if subprocess.run(["xdotool", "getdisplaygeometry"], env=env, capture_output=True).returncode == 0:
+            break
+        time.sleep(.05)
+    if subprocess.run(["gsettings", "range", "org.gnome.desktop.a11y.interface", "reduced-motion"],env=env,capture_output=True).returncode:
+        schemas = art / "schemas"
+        schemas.mkdir(exist_ok=True)
+        shutil.copy(root / "tests/settings/gnome51-a11y-interface.gschema.xml",schemas)
+        subprocess.run(["glib-compile-schemas",str(schemas)],check=True)
+        env["GSETTINGS_SCHEMA_DIR"] = str(schemas)
+    subprocess.run(["gsettings","set","org.gnome.desktop.a11y.interface","reduced-motion","no-preference"],env=env,check=True)
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "enable-animations", "true"], env=env, check=True)
+    compositor = spawn([str(frozen / "tuna-compositor"), "--socket", "lifecycle-proof", "--shell-bin", str(frozen / "tuna-shell-gtk")], "compositor")
+    wait(lambda d: d["animation_clock_manual"] and d["rendered_frames"] >= 5 and d["wallpaper_diagnostics"]["decode_result_count"] > 0 and any(layer["namespace"] == "tuna-panel" for layer in d["layers"]), "ready")
+    baseline = screenshot("00-baseline")
+    client = spawn(["/usr/bin/python3", str(root / "scripts/lib/tuna-window-lifecycle-client.py")], "client", {"WAYLAND_DISPLAY":"lifecycle-proof", "GDK_BACKEND":"wayland"})
+    start = wait(lambda d: len(d["window_lifecycle"]["opening"]) == 1, "normal-map-start")
+    normal = start["window_lifecycle"]["opening"][0]
+    assert normal["duration_ms"] == 150 and normal["frame"]["scale"] == [0.01, .05]
+    normal_id = normal["window"]
+    initial = screenshot("01-map-start")
+    move(75)
+    wait(lambda d: d["window_lifecycle"]["opening"][0]["elapsed_ms"] == 75, "normal-map-half")
+    screenshot("02-map-half")
+    move(150)
+    final = wait(lambda d: not d["window_lifecycle"]["opening"], "normal-map-end")
+    mapped = screenshot("03-mapped")
+    geometry = next(w["rect"] for w in final["windows"] if w["id"] == normal_id)
+    x,y,w,h = geometry
+    point = (x+w//2+70,y+h//2+50)
+    assert initial.getpixel(point) == baseline.getpixel(point), "zero-alpha map leaked content"
+    assert mapped.getpixel(point) != baseline.getpixel(point), "mapped window not painted"
+    action("dialog", 1)
+    dialog = wait(lambda d: any(e["kind"] == "Dialog" for e in d["window_lifecycle"]["opening"]), "dialog-map-start")
+    assert next(e for e in dialog["window_lifecycle"]["opening"] if e["kind"] == "Dialog")["duration_ms"] == 100
+    move(250)
+    wait(lambda d: not d["window_lifecycle"]["opening"], "dialog-map-end")
+    action("close-dialog", 2)
+    wait(lambda d: len(d["window_lifecycle"]["destroying"]) == 1, "dialog-destroy-start")
+    move(350)
+    wait(lambda d: not d["window_lifecycle"]["destroying"], "dialog-destroy-end")
+    action("close", 3)
+    client.wait(timeout=10)
+    wait(lambda d: not d["windows"] and len(d["window_lifecycle"]["destroying"]) == 1, "normal-destroy-start")
+    retained = screenshot("04-destroy-retained")
+    top_point = (x+w//2+70,y+h//3)
+    assert retained.getpixel(point) == mapped.getpixel(point) and retained.getpixel(top_point) == mapped.getpixel(top_point), "last frame lost/flipped after client exit"
+    move(425)
+    wait(lambda d: d["window_lifecycle"]["destroying"][0]["elapsed_ms"] == 75, "normal-destroy-half")
+    faded = screenshot("05-destroy-half")
+    assert faded.getpixel(point) != retained.getpixel(point), "destroy did not fade"
+    move(500)
+    wait(lambda d: not d["window_lifecycle"]["destroying"], "normal-destroy-end")
+    ended = screenshot("06-destroy-end")
+    assert ended.getpixel(point) == baseline.getpixel(point), "destroy left stale pixels"
+    subprocess.run(["gsettings","set","org.gnome.desktop.a11y.interface","reduced-motion","reduce"],env=env,check=True)
+    wait(lambda d:d["motion_policy"] == "fade-only","reduced-motion")
+    command.unlink(missing_ok=True)
+    second = spawn(["/usr/bin/python3",str(root / "scripts/lib/tuna-window-lifecycle-client.py")],"reduced-client",{"WAYLAND_DISPLAY":"lifecycle-proof","GDK_BACKEND":"wayland"})
+    reduced = wait(lambda d:len(d["window_lifecycle"]["opening"]) == 1,"reduced-map-start")
+    assert reduced["window_lifecycle"]["opening"][0]["frame"]["scale"] == [1.0,1.0]
+    move(650)
+    wait(lambda d:not d["window_lifecycle"]["opening"],"reduced-map-end")
+    action("close",4)
+    second.wait(timeout=10)
+    reduced_close = wait(lambda d:len(d["window_lifecycle"]["destroying"]) == 1,"reduced-destroy-start")
+    assert reduced_close["window_lifecycle"]["destroying"][0]["frame"]["scale"] == [1.0,1.0]
+    move(800)
+    wait(lambda d:not d["window_lifecycle"]["destroying"],"reduced-destroy-end")
+    subprocess.run(["gsettings","set","org.gnome.desktop.interface","enable-animations","false"],env=env,check=True)
+    wait(lambda d:d["motion_policy"] == "off","animations-off")
+    command.unlink(missing_ok=True)
+    third = spawn(["/usr/bin/python3",str(root / "scripts/lib/tuna-window-lifecycle-client.py")],"off-client",{"WAYLAND_DISPLAY":"lifecycle-proof","GDK_BACKEND":"wayland"})
+    wait(lambda d:len(d["windows"]) == 1 and not d["window_lifecycle"]["opening"],"off-map")
+    action("close",5)
+    third.wait(timeout=10)
+    wait(lambda d:not d["windows"] and not d["window_lifecycle"]["destroying"] and d["window_lifecycle"]["retained_destroy_bytes"] == 0,"off-destroy")
+    assert compositor.poll() is None, "compositor crashed after destroyed surface"
+    subprocess.run(["gsettings","set","org.gnome.desktop.interface","enable-animations","true"],env=env,check=True)
+    subprocess.run(["gsettings","set","org.gnome.desktop.a11y.interface","reduced-motion","no-preference"],env=env,check=True)
+    wait(lambda d:d["motion_policy"] == "full","restored-motion")
+    command.unlink(missing_ok=True)
+    fourth = spawn(["/usr/bin/python3",str(root / "scripts/lib/tuna-window-lifecycle-client.py")],"interrupted-client",{"WAYLAND_DISPLAY":"lifecycle-proof","GDK_BACKEND":"wayland"})
+    early = wait(lambda d:len(d["window_lifecycle"]["opening"]) == 1,"interrupted-map-start")
+    early_id = early["window_lifecycle"]["opening"][0]["window"]
+    move(875)
+    wait(lambda d:d["window_lifecycle"]["opening"][0]["elapsed_ms"] == 75,"interrupted-map-half")
+    action("close",6)
+    fourth.wait(timeout=10)
+    wait(lambda d:not d["windows"] and not d["window_lifecycle"]["destroying"] and any(e["window"] == early_id and e["outcome"] == "interrupted-map" for e in d["window_lifecycle"]["history"]),"interrupted-close")
+    closed = screenshot("07-interrupted-close")
+    assert closed.getpixel(point) == baseline.getpixel(point), "interrupted map left an opaque ghost"
+    success = True
+finally:
+    owned_accessibility_pids = [manifest["session_isolation"]["accessibility_bus_pid"]] if "session_isolation" in manifest else []
+    cleanup_query_errors = []
+    if accessibility:
+        for name in ("org.a11y.atspi.Registry",):
+            try:
+                owned_accessibility_pids.append(accessibility.call_sync("org.freedesktop.DBus","/org/freedesktop/DBus","org.freedesktop.DBus","GetConnectionUnixProcessID",GLib.Variant("(s)",(name,)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0])
+            except GLib.Error as error:
+                if not expected_missing_accessibility_owner(name, Gio.DBusError.get_remote_error(error)):
+                    cleanup_query_errors.append(str(error))
+            except Exception as error:
+                cleanup_query_errors.append(str(error))
+    for pid in owned_accessibility_pids[1:]:
+        try:
+            owned_pidfds.append(os.pidfd_open(pid))
+        except ProcessLookupError:
+            pass
+    for proc in reversed(processes):
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid,signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid,signal.SIGKILL)
+                proc.wait()
+    accessibility_stopped = True
+    for pidfd in owned_pidfds:
+        poller = select.poll()
+        poller.register(pidfd,select.POLLIN)
+        try:
+            signal.pidfd_send_signal(pidfd,signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        if not poller.poll(1000):
+            signal.pidfd_send_signal(pidfd,signal.SIGKILL)
+            accessibility_stopped = bool(poller.poll(1000)) and accessibility_stopped
+        os.close(pidfd)
+    if accessibility:
+        try:
+            accessibility.close_sync(None)
+        except GLib.Error:
+            pass
+    shutil.rmtree(runtime)
+    manifest["owned_cleanup"] = {"runtime_removed":not runtime.exists(), "accessibility_pids":owned_accessibility_pids,"accessibility_processes_stopped":accessibility_stopped, "accessibility_identity_verified":bool(owned_accessibility_pids) and not cleanup_query_errors, "query_errors":cleanup_query_errors}
+    (art / "manifest.json").write_text(json.dumps(manifest,indent=2))
+    for log in logs:
+        log.close()
+
+require_owned_cleanup(manifest["owned_cleanup"])
+if success:
+    (art / "assertions.txt").write_text("WL-NORMAL-MAP pass 150ms scale/fade rendered\nWL-DIALOG pass 100ms map/destroy native transient\nWL-DESTROY pass retained frame after client exit; fade and cleanup\nWL-REDUCED pass scale disabled, normal fades retained\nWL-OFF pass immediate map/destroy, no retained content\nWL-INTERRUPTED pass exit during map skips unsafe raw snapshot\nWL-CLEANUP pass private runtime and accessibility processes removed\n")
+    print(f"window lifecycle proof passed: {art}")

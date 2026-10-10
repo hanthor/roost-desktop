@@ -37,10 +37,14 @@ jobs:
       - run: scripts/rename-to-tuna --check --no-cargo
       - run: python3 scripts/lib/tuna-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
+      - run: python3 scripts/lib/ledger-tests.py
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
+      - run: python3 scripts/lib/mutter-profiler-integrity-tests.py
       - run: python3 scripts/lib/tuna-perf-payload-tests.py
       - run: python3 scripts/lib/tuna-perf-reference-tests.py
+      - run: python3 scripts/lib/tuna-overview-receipt-tests.py
+      - run: python3 scripts/lib/window-lifecycle-proof-tests.py
       - run: python3 scripts/lib/tuna-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
       - run: python3 scripts/lib/tuna-pipewire-dump-tests.py
@@ -267,9 +271,23 @@ jobs:
           done
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
       - run: scripts/ci-install-gtk4-layer-shell
-      - run: shellcheck scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough
+      - run: shellcheck -x scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough scripts/tuna-gtk-accessibility-proof
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
       - run: scripts/tuna-walkthrough check
+      - name: Prove live accessibility widgets and focus timers
+        run: |
+          cargo test -p tuna-shell-gtk --bin tuna-shell-gtk --no-run --message-format=json > "$RUNNER_TEMP/tuna-gtk-a11y-build.json"
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          messages = [json.loads(line) for line in pathlib.Path(os.environ['RUNNER_TEMP'], 'tuna-gtk-a11y-build.json').read_text().splitlines()]
+          binaries = [m['executable'] for m in messages if m.get('reason') == 'compiler-artifact' and m.get('profile', {}).get('test') and m.get('target', {}).get('name') == 'tuna-shell-gtk' and m.get('executable')]
+          if len(binaries) != 1:
+              raise RuntimeError('expected exactly one GTK test executable')
+          destination = pathlib.Path('gtk-shell-artifacts/a11y/bin/gtk-tests')
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(binaries[0], destination)
+          PY
+          scripts/tuna-gtk-accessibility-proof gtk-shell-artifacts/a11y/bin/gtk-tests "$(git rev-parse HEAD)" gtk-shell-artifacts/a11y
       # pam_wrapper backs G-UNLOCK, IBus G-IME and wayland-utils
       # G-WAYLAND-INFO; all required so no stage can silently skip.
       - run: scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts
@@ -622,7 +640,9 @@ jobs:
           name: scroll-proof-shots
           path: /tmp/tuna-docs/scroll
       - run: shellcheck scripts/tuna-docs-shots
-      - run: scripts/tuna-docs-shots collect /tmp/tuna-docs/journey /tmp/tuna-docs/app /tmp/tuna-docs/scroll --dest /tmp/tuna-docs/shots && ls /tmp/tuna-docs/shots | wc -l | grep -q 7
+      - run: |
+          scripts/tuna-docs-shots collect /tmp/tuna-docs/journey /tmp/tuna-docs/app /tmp/tuna-docs/scroll --dest /tmp/tuna-docs/shots
+          python3 -c 'from pathlib import Path; assert len(list(Path("/tmp/tuna-docs/shots").iterdir())) == 7'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docs-shots

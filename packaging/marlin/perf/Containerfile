@@ -9,6 +9,8 @@ COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-tuna-vm-lane.
 COPY scripts/lib/tuna-perf-guest.py /usr/libexec/tuna-perf-guest
 COPY scripts/tuna-frame-pacer-build /tmp/frame-pacer/scripts/tuna-frame-pacer-build
 COPY scripts/lib/tuna-frame-pacer.c /tmp/frame-pacer/scripts/lib/tuna-frame-pacer.c
+COPY packaging/marlin/perf/tuna-perf-session /usr/libexec/tuna-perf-session
+COPY scripts/lib/tuna_overview_receipts.py /usr/libexec/tuna_overview_receipts.py
 COPY packaging/marlin/perf/tuna-perf-phase /usr/libexec/tuna-perf-phase
 COPY packaging/marlin/perf/tuna-kernel-trace /usr/libexec/tuna-kernel-trace
 COPY packaging/marlin/perf/tuna-gnome-profiler /usr/libexec/tuna-gnome-profiler
@@ -24,10 +26,11 @@ RUN case "$DESKTOP" in gnome|tuna) ;; *) exit 1 ;; esac && \
     bash /tmp/frame-pacer/scripts/tuna-frame-pacer-build /tmp/frame-pacer/build && \
     install -Dm755 /tmp/frame-pacer/build/tuna-frame-pacer /usr/libexec/tuna-frame-pacer && \
     rm -rf /tmp/frame-pacer && \
-    chmod 0755 /usr/libexec/tuna-perf-phase /usr/libexec/tuna-gnome-profiler /usr/libexec/tuna-kernel-trace && \
+    chmod 0755 /usr/libexec/tuna-perf-session /usr/libexec/tuna-perf-phase /usr/libexec/tuna-gnome-profiler /usr/libexec/tuna-kernel-trace && \
     useradd -M -d /home/tuna-test -s /bin/bash -U tuna-test && \
     echo 'tuna-test:tuna' | chpasswd && \
     sed -i "s/DefaultSession=tuna.desktop/DefaultSession=${DESKTOP}.desktop/" /etc/gdm/custom.conf && \
     sed -i "s/Session=tuna/Session=${DESKTOP}/" /usr/lib/tmpfiles.d/tuna-vm-lane.conf && \
     test -f "/usr/share/wayland-sessions/${DESKTOP}.desktop" && \
+    if [ "$DESKTOP" = tuna ]; then sed -i 's|^Exec=.*|Exec=/usr/libexec/tuna-perf-session|' /usr/share/wayland-sessions/tuna.desktop; fi && \
     systemctl enable tuna-perf.service qemu-guest-agent.service

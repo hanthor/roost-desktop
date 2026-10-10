@@ -867,6 +867,7 @@ impl Runtime {
                 SESSION_KIND_ENV,
                 match backend {
                     Backend::Winit(_) => "nested",
+                    #[cfg(feature = "drm")]
                     Backend::Drm(_) => "hardware",
                 },
             );
@@ -879,6 +880,7 @@ impl Runtime {
             use smithay::backend::renderer::ImportDma;
             let formats: Vec<_> = match &mut backend {
                 Backend::Winit(winit) => winit.renderer().dmabuf_formats().into_iter().collect(),
+                #[cfg(feature = "drm")]
                 Backend::Drm(drm) => drm.renderer.dmabuf_formats().into_iter().collect(),
             };
             state.enable_dmabuf(formats);
@@ -1293,8 +1295,10 @@ impl Runtime {
                     self.control.set_overview(!self.control.overview_open());
                     #[cfg(feature = "drm")]
                     if matches!(self.backend, Backend::Drm(_)) {
-                        self.performance_trace
-                            .input(Duration::from(self.state.presentation_now()));
+                        self.performance_trace.input(
+                            Duration::from(self.state.presentation_now()),
+                            self.control.overview_open(),
+                        );
                     }
                 }
                 TriggerAction::Open => {
@@ -1644,6 +1648,7 @@ impl Runtime {
                 .collect::<Vec<_>>(),
         });
         // Overdraw per output for the last drawn frame (#503).
+        doc["window_lifecycle"] = self.manager.window_lifecycle().to_json();
         doc["frame_cost"] = self
             .frame_costs
             .iter()
@@ -1701,7 +1706,7 @@ impl Runtime {
             .then(|| match &self.backend {
                 #[cfg(feature = "drm")]
                 Backend::Drm(drm) => Some(drm.relative_motion_events()),
-                Backend::Winit(_) => None,
+                Backend::Winit(_) => None::<u64>,
             })
             .flatten());
         doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
@@ -2785,6 +2790,65 @@ impl Runtime {
         }
     }
 
+    /// Private shell feedback remains inside the currently mapped screenshot
+    /// overlay. Recheck the lock and surface after draining the command queue.
+    fn move_screenshot_pointer(&mut self, x: i32, y: i32) {
+        if self.is_locked() || x < 0 || y < 0 {
+            return;
+        }
+        let Some(surface) = crate::layer::exclusive_keyboard_layer(&self.state) else {
+            return;
+        };
+        if !self.state.panel_surfaces().into_iter().any(|record| {
+            record.surface == surface
+                && record.namespace == tuna_shell_control::SCREENSHOT_NAMESPACE
+        }) {
+            return;
+        }
+        let Some((_, origin, _)) = crate::layer::layer_layout(&self.state)
+            .into_iter()
+            .find(|(s, _, _)| *s == surface)
+        else {
+            return;
+        };
+        let Some(size) = self
+            .state
+            .layer_surfaces()
+            .into_iter()
+            .find(|s| *s.wl_surface() == surface)
+            .and_then(|s| s.current_state().size)
+        else {
+            return;
+        };
+        if x >= size.w || y >= size.h {
+            return;
+        }
+        let pos = (
+            f64::from(origin.0) + f64::from(x),
+            f64::from(origin.1) + f64::from(y),
+        );
+        let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+        self.manager
+            .pointer_motion(&mut self.state, pos.into(), time);
+        let applied = self.manager.pointer_pos();
+        // Winit displays the host cursor; seat state alone leaves it behind.
+        match &self.backend {
+            Backend::Winit(backend) => {
+                let size = backend.window_size();
+                let logical = self.state.desktop_size();
+                let physical = smithay::reexports::winit::dpi::PhysicalPosition::new(
+                    applied.x * f64::from(size.w) / f64::from(logical.0.max(1)),
+                    applied.y * f64::from(size.h) / f64::from(logical.1.max(1)),
+                );
+                if let Err(error) = backend.window().set_cursor_position(physical) {
+                    eprintln!("tuna-compositor: screenshot cursor relocation: {error}");
+                }
+            }
+            #[cfg(feature = "drm")]
+            Backend::Drm(_) => {}
+        }
+    }
+
     /// Apply GNOME's input settings (#60): the seat's keymap and key
     /// repeat, libinput pointer devices (hardware), the hot corner.
     fn apply_input_settings(&mut self, settings: tuna_shell_control::InputSettings) {
@@ -3037,6 +3101,9 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some((x, y)) = outcome.screenshot_pointer {
+            self.move_screenshot_pointer(x, y);
         }
         if let Some(enabled) = outcome.screen_reader {
             #[cfg(feature = "drm")]
@@ -3343,6 +3410,26 @@ impl Runtime {
         // The slide first: size changes read this frame's slide offsets.
         self.step_workspace_slide();
         self.step_size_changes();
+        let now = self.animation_clock.now();
+        let allowed = crate::window_lifecycle::effects_allowed(
+            self.control.overview_open(),
+            self.shell_swipe.is_some(),
+            self.manager.workspace_slide().running(),
+            locked,
+        );
+        let renderer = match &mut self.backend {
+            Backend::Winit(backend) => backend.renderer(),
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => &mut drm.renderer,
+        };
+        crate::window_lifecycle::step_frame(
+            &mut self.manager,
+            renderer,
+            &self.state,
+            now,
+            self.input_settings.motion,
+            allowed,
+        );
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview
@@ -3363,6 +3450,8 @@ impl Runtime {
             background
         };
         let show_paper = show_content && !overlay_visible && overview.is_none();
+        #[cfg(feature = "drm")]
+        let overview_requested = self.control.overview_open();
         #[cfg(feature = "drm")]
         let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
         let desktop = self.background_desktop();
@@ -3705,8 +3794,17 @@ impl Runtime {
                     out.trace_wake_submission();
                     out.pending = true;
                     if index == 0 {
-                        self.performance_trace
-                            .queued(Duration::from(self.state.presentation_now()));
+                        self.performance_trace.queued(
+                            Duration::from(self.state.presentation_now()),
+                            crate::performance_trace::CardReadiness {
+                                expected: cards.map(|layout| layout.cards.len()).or_else(|| {
+                                    (!overview_requested && overview.is_none()).then_some(0)
+                                }),
+                                rendered: if cards.is_some() { paper.len() } else { 0 },
+                                cached: self.wallpaper.card_counts().0,
+                                pending: self.wallpaper.card_counts().1,
+                            },
+                        );
                     }
                     out.last_frame = Some(signature);
                     self.frame_costs.insert(out.name.clone(), cost);
@@ -4139,6 +4237,18 @@ fn scene_elements(
     // Size-change snapshots with the bottom-to-top index they sit at.
     let mut snapshots = Vec::new();
     for (id, window, geometry) in manager.render_entries() {
+        for ghost in manager
+            .window_lifecycle()
+            .ghosts()
+            .filter(|g| g.before == Some(id))
+        {
+            snapshots.extend(
+                manager
+                    .window_lifecycle()
+                    .element(ghost, renderer, view)
+                    .map(|e| (elements.len(), e)),
+            );
+        }
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
@@ -4189,6 +4299,18 @@ fn scene_elements(
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
+            if let Some(frame) = manager.window_lifecycle().opening_frame(id) {
+                let r = crate::window_lifecycle::rect(geometry, frame);
+                let geo = crate::popup::window_geometry_loc(&surface);
+                let origin = view.physical(
+                    r.loc.x - f64::from(geo.x) * frame.scale.0,
+                    r.loc.y - f64::from(geo.y) * frame.scale.1,
+                );
+                let alpha = frame.alpha * manager.render_alpha(&window);
+                elements.extend(render_elements_from_surface_tree::<_,WaylandSurfaceRenderElement<_>>(renderer,&surface,origin,view.scale,alpha,Kind::Unspecified).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
+                owners.resize(elements.len(), Some(id));
+                continue;
+            }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
             let committed_width = window.geometry().size.w;
             let sx = if manager.session_mode() == crate::windows::SessionMode::Scroll
@@ -4215,6 +4337,19 @@ fn scene_elements(
             }
             owners.resize(elements.len(), Some(id));
         }
+    }
+    let rendered_ids: Vec<_> = manager.render_entries().iter().map(|e| e.0).collect();
+    for ghost in manager
+        .window_lifecycle()
+        .ghosts()
+        .filter(|g| g.before.is_none_or(|id| !rendered_ids.contains(&id)))
+    {
+        snapshots.extend(
+            manager
+                .window_lifecycle()
+                .element(ghost, renderer, view)
+                .map(|e| (elements.len(), e)),
+        );
     }
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).

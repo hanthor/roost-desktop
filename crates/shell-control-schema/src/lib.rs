@@ -158,9 +158,10 @@ impl ProtocolVersion {
     /// `0.28` replaces `InputSettings::enable_animations` with `motion`,
     /// GNOME's three-state motion policy plus its slow-down factor.
     /// The positional postcard body changes, so both peers ship together.
+    /// `0.29` appends private screenshot selection pointer movement.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 28,
+        minor: 29,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -376,6 +377,10 @@ pub enum CommandKind {
     /// Preference from the authenticated supervised shell. Nested runtimes
     /// ignore it; the hardware compositor owns the actual Orca child.
     SetScreenReader { enabled: bool },
+    /// GNOME screenshot keyboard selection cursor feedback. Coordinates are
+    /// local to the mapped exclusive screenshot overlay in logical pixels,
+    /// never global input.
+    MoveScreenshotPointer { x: i32, y: i32 },
 }
 
 /// Screen Reader process lifecycle, not proof of spoken usability.
@@ -1234,8 +1239,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_28() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
+    fn current_version_is_0_29() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 29));
     }
 
     #[test]
@@ -1335,7 +1340,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 30).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
@@ -1431,6 +1437,7 @@ mod tests {
             CommandKind::FocusWorkspace { workspace: 2 },
             CommandKind::ToggleOverview,
             CommandKind::CloseWindow { window: 7 },
+            CommandKind::MoveScreenshotPointer { x: 475, y: 399 },
             CommandKind::Lock,
         ] {
             roundtrip(&Message::Command { id: 99, kind });

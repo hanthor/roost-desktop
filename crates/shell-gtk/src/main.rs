@@ -13,6 +13,7 @@
 //! The compositor runs one supervised shell; select this one with
 //! `TUNA_SHELL_BIN=tuna-shell-gtk` while it grows to parity.
 
+mod accessibility;
 mod audio_state;
 mod background_settings;
 mod bt_menu;
@@ -1028,6 +1029,7 @@ fn take_screenshot(window: bool, notify: Rc<notify::NotifyUi>) {
 }
 
 fn build(app: &adw::Application) {
+    accessibility::start_focus_policy();
     let provider = gtk::CssProvider::new();
     // Shell CSS has GNOME's baseline face/size, but follows the user's font live.
     let apply_font = {
@@ -1287,6 +1289,7 @@ fn build(app: &adw::Application) {
     let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     end.append(&screencast::indicator(&recorder));
     end.append(&tray::tray());
+    end.append(&accessibility::menu());
     end.append(&system);
     bar.set_end_widget(Some(&end));
     window.set_child(Some(&bar));
@@ -1444,6 +1447,7 @@ fn build(app: &adw::Application) {
     let screenshot_ui = {
         let notify_shot = notify.clone();
         let notify_post = notify.clone();
+        let pointer_shell = shell.clone();
         screenshot_ui::ScreenshotUi::new(
             app.upcast_ref(),
             Rc::new(move || take_screenshot(true, notify_shot.clone())),
@@ -1451,6 +1455,11 @@ fn build(app: &adw::Application) {
                 notify_post.post("Screenshot", "screenshot-recorded-symbolic", summary, body);
             }),
             recorder.clone(),
+            Rc::new(move |(x, y)| {
+                if let Some(control) = pointer_shell.borrow_mut().control.as_mut() {
+                    let _ = control.move_screenshot_pointer(x, y);
+                }
+            }),
         )
     };
 

@@ -250,6 +250,30 @@ mod tests {
     }
 
     #[test]
+    fn asynchronously_ready_background_repaints_an_idle_scene() {
+        // The native path polls wallpaper/card workers before capturing this
+        // signature. An absent card becoming ready adds its new buffer ID to
+        // the background pass even without an input event or client commit.
+        let mut pending = scene();
+        pending.groups = vec![vec![]];
+        assert!(!needs_repaint(Some(&pending), &pending, false));
+        let mut ready = pending.clone();
+        ready.groups[0].push(ElementSignature::capture(
+            &SolidColorRenderElement::new(
+                Id::new(),
+                Rectangle::from_size((40, 30).into()),
+                0usize,
+                Color32F::BLACK,
+                Kind::Unspecified,
+            ),
+            1.0,
+        ));
+        assert!(needs_repaint(Some(&pending), &ready, false));
+        assert!(!ready.same_global_drawing(&pending));
+        assert!(!needs_repaint(Some(&ready), &ready, false));
+    }
+
+    #[test]
     fn overlapping_elements_and_render_passes_preserve_order() {
         let element = || {
             ElementSignature::capture(

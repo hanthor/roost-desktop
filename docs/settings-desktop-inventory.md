@@ -4,6 +4,8 @@ All 429 keys from `gsettings-desktop-schemas-51.0-1.fc45.x86_64` in the GNOME 51
 
 Handedness follow-up: main `c822ab91abbb8c07fdd89ddde5c81a71f7843ff3`, after qualified #379. Mouse and touchpad dispositions below reflect the merged libinput consumers; tablet handedness remains unsupported.
 
+Switcher follow-up: main `c387326d067a53b7b583aafb9e0206fba0fab59c` (2026-10-10). The six `switch-windows`, `cycle-windows`, and `cycle-group` forward/backward dispositions below already match the live `SetSwitcherKeys` registration in `crates/shell-gtk/src/keybindings.rs`. This review covers those six keys, not a fresh qualification of all 429 keys. The count checker checks completeness and duplicates only; an “Honored” disposition identifies a consumer and does not establish GNOME 51 behavioral parity. Legacy and app-owned contracts still require explicit enforcing-owner decisions and application/panel evidence under [#365](https://github.com/tuna-os/tuna-desktop/issues/365).
+
 Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.14.5/gdk/wayland/gdkdisplay-wayland.c). Related shell, Mutter and settings-daemon keys are in [settings-map.md](settings-map.md).
 
 ## org.gnome.desktop.a11y
@@ -11,7 +13,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | Key | Status | Reason |
 |---|---|---|
 | always-show-text-caret | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
-| always-show-universal-access-status | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| always-show-universal-access-status | Honored (GTK shell) | Live accessibility indicator visibility follows GNOME 51: requested or any enabled menu feature; menu bindings do not establish compositor support for every feature. Focused source/runtime qualification is documented in accessibility-shell.md |
 ## org.gnome.desktop.a11y.applications
 
 | Key | Status | Reason |
@@ -24,7 +26,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | Key | Status | Reason |
 |---|---|---|
 | high-contrast | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
-| keyboard-focus-visible-timeout | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| keyboard-focus-visible-timeout | Honored (GTK shell) | Live a11y.interface seconds preference controls shell focus visibility: zero forever, negative toolkit default; GTK property when present and a weak-window fallback on older GTK. External application/installed image qualification remains separate; see accessibility-shell.md |
 | reduced-motion | Honored | GNOME 51 reduce/no-preference enum combines with enable-animations into the shared full/fade-only/off motion policy: reduce keeps fades (idle shield) and snaps shell GTK transitions and compositor motion; live proof G-ANIMATIONS-OFF; Introspect AnimationsEnabled stays true under reduce, as in GNOME 51 (G-INTROSPECT-MOTION, qualification pending) |
 | show-status-shapes | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 ## org.gnome.desktop.a11y.keyboard

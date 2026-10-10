@@ -3,6 +3,7 @@
 
 Usage:
   scripts/tuna-ledger check --tests LIST [--assertions FILE ...] [--ledger PATH]
+                            [--require-complete]
   scripts/tuna-ledger summary [--ledger PATH]
 
 LIST is `cargo test --workspace -- --list --format terse` output. Each
@@ -33,6 +34,9 @@ def parse_ledger(path):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if cells and cells[0] == "ID":
                 header = cells
+                if header != HEADER:
+                    errors.append(f"ledger header must be {HEADER}, got {header}")
+                    return [], errors
                 continue
             if set("".join(cells)) <= set("-: "):
                 continue
@@ -44,6 +48,15 @@ def parse_ledger(path):
             rows.append(dict(zip(header, cells), _line=n))
     if header != HEADER:
         errors.append(f"ledger header must be {HEADER}, got {header}")
+        return [], errors
+    if not rows:
+        errors.append("ledger has no capability rows")
+    for row in rows:
+        if not row["ID"] or not row["GNOME 51 behavior"]:
+            errors.append(f"line {row['_line']}: capability ID and behavior must be nonempty")
+        status = row["Tuna Desktop status"].split(" ")[0]
+        if status not in {"pass", "partial", "missing", "deviation", "untested"}:
+            errors.append(f"{row['ID']}: unsupported status '{row['Tuna Desktop status']}'")
     ids = Counter(r["ID"] for r in rows)
     errors += [f"duplicate row id {i}" for i, c in ids.items() if c > 1]
     return rows, errors
@@ -96,8 +109,12 @@ def main():
     ap.add_argument("cmd", choices=["check", "summary"])
     ap.add_argument("--ledger", default="docs/parity-ledger.md")
     ap.add_argument("--tests")
+    ap.add_argument("--require-complete", action="store_true",
+                    help="fail unless every row is exactly 'pass' (v1 qualification)")
     ap.add_argument("--assertions", action="append", default=[])
     a = ap.parse_args()
+    if a.require_complete and a.cmd != "check":
+        ap.error("--require-complete needs check with proof inputs")
     rows, errors = parse_ledger(a.ledger)
     if a.cmd == "check":
         if not a.tests:
@@ -105,6 +122,8 @@ def main():
         tests = load_tests(a.tests)
         passed = load_assertions(a.assertions)
         for r in rows:
+            if a.require_complete and r["Tuna Desktop status"] != "pass":
+                errors.append(f"{r['ID']}: v1 requires pass; got '{r['Tuna Desktop status']}'")
             cited = refs(r["Tests"])
             if r["Tuna Desktop status"].startswith("pass") and not cited:
                 errors.append(f"{r['ID']}: status is pass but cites no test")
