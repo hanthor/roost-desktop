@@ -24,6 +24,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::notification_policy::{self, LockSource, PolicyStore, SourcePolicy};
 
 /// How many banners may stack before older ones wait in history.
 pub const MAX_BANNERS: usize = 3;
@@ -94,6 +97,12 @@ pub struct Notification {
     icon: String,
     /// The `desktop-entry` hint, without `.desktop`; empty for none.
     desktop_entry: String,
+    /// The installed app whose policy governs it (desktop id without
+    /// `.desktop`); empty for the generic policy.
+    app_id: String,
+    /// Seen by the user: shown as a banner or in the open message list
+    /// (GNOME's `acknowledged`). The lock screen counts the rest.
+    acknowledged: bool,
     /// When it arrived (or was last replaced), in Unix seconds, for
     /// GNOME's "Just now" / "5 minutes ago" label.
     received: u64,
@@ -131,6 +140,26 @@ impl Notification {
     /// The `desktop-entry` hint (empty when absent).
     pub fn desktop_entry(&self) -> &str {
         &self.desktop_entry
+    }
+
+    /// The installed app whose notification policy applies (empty for
+    /// the generic policy).
+    pub fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
+    /// The source it belongs to: its app, else its desktop-entry hint,
+    /// else the sender's name.
+    pub fn source_key(&self) -> &str {
+        [&self.app_id, &self.desktop_entry, &self.app]
+            .into_iter()
+            .find(|k| !k.is_empty())
+            .map_or("", |k| k.as_str())
+    }
+
+    /// Whether the user has seen it.
+    pub fn acknowledged(&self) -> bool {
+        self.acknowledged
     }
 
     /// Arrival time in Unix seconds.
@@ -234,6 +263,12 @@ fn decode_notification(item: &serde_json::Value) -> Option<Notification> {
         id,
         icon: text("icon"),
         desktop_entry: text("desktop_entry"),
+        app_id: text("app_id"),
+        // Files from before acknowledgement existed hold nothing new.
+        acknowledged: item
+            .get("acknowledged")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
         received: item
             .get("received")
             .and_then(serde_json::Value::as_u64)
@@ -265,6 +300,53 @@ pub fn state_dir() -> Option<PathBuf> {
     crate::xdg::state_home().map(|base| base.join(STATE_DIR_NAME))
 }
 
+/// A notification's sound hints (`sound-name`, `sound-file`); empty
+/// fields are absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sound {
+    /// A sound theme name (`sound-name`).
+    pub name: String,
+    /// A sound file path (`sound-file`).
+    pub file: String,
+}
+
+impl Sound {
+    /// Whether there is anything to play.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_empty() && self.file.is_empty()
+    }
+}
+
+/// One `Notify` call as the daemon receives it.
+#[derive(Debug, Clone, Default)]
+pub struct Incoming {
+    pub app: String,
+    pub icon: String,
+    pub title: String,
+    pub body: String,
+    pub actions: Vec<NotificationAction>,
+    pub urgency: Urgency,
+    pub replaces_id: Option<u64>,
+    /// The `desktop-entry` hint.
+    pub desktop_entry: String,
+    pub sound: Sound,
+}
+
+/// The policy store behind a center (none: everything generic with the
+/// default global keys).
+#[derive(Clone, Default)]
+struct PolicySlot(Option<Arc<dyn PolicyStore>>);
+
+impl std::fmt::Debug for PolicySlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "PolicySlot(set)"
+        } else {
+            "PolicySlot(none)"
+        })
+    }
+}
+
 /// Local notification store: banner queue, history, DND gate.
 #[derive(Debug, Default)]
 pub struct NotificationCenter {
@@ -279,6 +361,10 @@ pub struct NotificationCenter {
     /// Set by [`NotificationCenter::load`], so a restored center
     /// keeps persisting to the file it came from.
     queue_path: Option<PathBuf>,
+    /// GNOME Settings' notification policy.
+    policy: PolicySlot,
+    /// Sounds due to play, oldest first (the shell drains them).
+    sounds: Vec<Sound>,
 }
 
 impl NotificationCenter {
@@ -380,6 +466,8 @@ impl NotificationCenter {
                     "app": n.app,
                     "icon": n.icon,
                     "desktop_entry": n.desktop_entry,
+                    "app_id": n.app_id,
+                    "acknowledged": n.acknowledged,
                     "received": n.received,
                     "title": n.title,
                     "body": n.body,
@@ -487,7 +575,24 @@ impl NotificationCenter {
         urgency: Urgency,
         replaces_id: Option<u64>,
     ) -> u64 {
-        let id = if let Some(replaces) = replaces_id {
+        let id = self.file(app, title, body, actions, urgency, replaces_id);
+        self.queue_banner(id, urgency);
+        self.persist();
+        id
+    }
+
+    /// Store a notification, replacing `replaces_id` in place when it
+    /// names a live entry; banners are left to the caller.
+    fn file(
+        &mut self,
+        app: &str,
+        title: &str,
+        body: &str,
+        actions: Vec<NotificationAction>,
+        urgency: Urgency,
+        replaces_id: Option<u64>,
+    ) -> u64 {
+        if let Some(replaces) = replaces_id {
             if let Some(entry) = self.history.iter_mut().find(|n| n.id == replaces) {
                 entry.app = app.to_owned();
                 entry.title = title.to_owned();
@@ -496,20 +601,15 @@ impl NotificationCenter {
                 entry.urgency = urgency;
                 entry.received = now_secs();
                 entry.expanded = false;
+                entry.acknowledged = false;
                 entry.consumed.clear();
-                self.queue_banner(replaces, urgency);
-                self.persist();
                 return replaces;
             }
-            self.alloc_fresh(app, title, body, actions, urgency)
-        } else {
-            self.alloc_fresh(app, title, body, actions, urgency)
-        };
-        self.persist();
-        id
+        }
+        self.alloc_fresh(app, title, body, actions, urgency)
     }
 
-    /// Append a fresh entry, pruning history and queueing its banner.
+    /// Append a fresh entry, pruning history.
     fn alloc_fresh(
         &mut self,
         app: &str,
@@ -524,6 +624,8 @@ impl NotificationCenter {
             id,
             icon: String::new(),
             desktop_entry: String::new(),
+            app_id: String::new(),
+            acknowledged: false,
             received: now_secs(),
             app: app.to_owned(),
             title: title.to_owned(),
@@ -539,7 +641,6 @@ impl NotificationCenter {
                 self.banners.retain(|b| *b != dropped);
             }
         }
-        self.queue_banner(id, urgency);
         id
     }
 
@@ -549,12 +650,132 @@ impl NotificationCenter {
         if self.dnd && urgency != Urgency::Critical {
             return;
         }
+        self.push_banner(id);
+    }
+
+    /// Queue a banner (once), dropping the oldest past the cap.
+    fn push_banner(&mut self, id: u64) {
         if !self.banners.contains(&id) {
             self.banners.push_back(id);
         }
         while self.banners.len() > MAX_BANNERS {
             self.banners.pop_front();
         }
+    }
+
+    /// Follow GNOME Settings' notification policy from `store`.
+    pub fn set_policy(&mut self, store: Arc<dyn PolicyStore>) {
+        self.policy = PolicySlot(Some(store));
+    }
+
+    /// The effective policy for an app (`None`: the generic policy).
+    pub fn policy_for(&self, app_id: Option<&str>) -> SourcePolicy {
+        match &self.policy.0 {
+            Some(store) => store.policy(app_id),
+            None => SourcePolicy::generic(Default::default()),
+        }
+    }
+
+    /// File a `Notify` call under its source's policy. A disabled app's
+    /// notification is dropped (never stored, critical or not), but the
+    /// sender still gets a fresh id, as from GNOME. Otherwise the app is
+    /// registered with GNOME Settings, and the policy decides the
+    /// banner, its sound and whether it opens expanded.
+    pub fn deliver(&mut self, n: Incoming) -> u64 {
+        let app_id = self
+            .policy
+            .0
+            .as_ref()
+            .and_then(|store| store.app_for(&n.desktop_entry, &n.app));
+        let policy = self.policy_for(app_id.as_deref());
+        let Some(delivery) = notification_policy::deliver(&policy, n.urgency, self.dnd) else {
+            return match n
+                .replaces_id
+                .filter(|id| self.history.iter().any(|e| e.id == *id))
+            {
+                // Replacing a filed one from a since-disabled app: it goes.
+                Some(id) => {
+                    self.remove(id);
+                    id
+                }
+                None => {
+                    self.next_id += 1;
+                    self.persist();
+                    self.next_id
+                }
+            };
+        };
+        if let (Some(store), Some(app)) = (self.policy.0.as_ref(), app_id.as_deref()) {
+            store.register(app);
+        }
+        let id = self.file(
+            &n.app,
+            &n.title,
+            &n.body,
+            n.actions,
+            n.urgency,
+            n.replaces_id,
+        );
+        if let Some(entry) = self.history.iter_mut().find(|e| e.id == id) {
+            entry.icon = n.icon;
+            entry.desktop_entry = n.desktop_entry.trim_end_matches(".desktop").to_owned();
+            entry.app_id = app_id.unwrap_or_default();
+            entry.expanded = delivery.expanded;
+        }
+        if delivery.banner {
+            self.push_banner(id);
+        } else {
+            self.banners.retain(|b| *b != id);
+        }
+        if delivery.sound && !n.sound.is_empty() {
+            self.sounds.push(n.sound);
+        }
+        self.persist();
+        id
+    }
+
+    /// Re-apply the policy to what is already filed: an app disabled
+    /// since its notifications arrived loses them. Returns the dropped
+    /// ids.
+    pub fn enforce_policy(&mut self) -> Vec<u64> {
+        let disabled: Vec<u64> = self
+            .history
+            .iter()
+            .filter(|n| !n.app_id.is_empty())
+            .filter(|n| !self.policy_for(Some(&n.app_id)).enable)
+            .map(|n| n.id)
+            .collect();
+        if !disabled.is_empty() {
+            self.history.retain(|n| !disabled.contains(&n.id));
+            self.banners.retain(|b| !disabled.contains(b));
+            self.persist();
+        }
+        disabled
+    }
+
+    /// Sounds due to play since the last call.
+    pub fn take_sounds(&mut self) -> Vec<Sound> {
+        std::mem::take(&mut self.sounds)
+    }
+
+    /// Mark notifications seen (a banner shown, the list opened).
+    pub fn acknowledge(&mut self, ids: &[u64]) {
+        let mut changed = false;
+        for entry in self.history.iter_mut().filter(|n| ids.contains(&n.id)) {
+            changed |= !std::mem::replace(&mut entry.acknowledged, true);
+        }
+        if changed {
+            self.persist();
+        }
+    }
+
+    /// What the lock screen shows, by the current policy: one entry per
+    /// source with unseen notifications that may show while locked
+    /// (see [`notification_policy::lock_screen`]).
+    pub fn lock_screen(&self) -> Vec<LockSource> {
+        notification_policy::lock_screen(self.history.iter().rev(), |n| {
+            self.policy_for((!n.app_id.is_empty()).then_some(n.app_id.as_str()))
+        })
     }
 
     /// Dismiss a banner (history keeps the entry).
@@ -625,6 +846,190 @@ mod tests {
 
     fn center() -> NotificationCenter {
         NotificationCenter::new()
+    }
+
+    /// GNOME Settings in memory: apps by desktop id, the registrations
+    /// they made.
+    #[derive(Default)]
+    struct FakeStore {
+        global: std::sync::Mutex<notification_policy::GlobalPrefs>,
+        apps: std::sync::Mutex<std::collections::HashMap<String, notification_policy::AppPrefs>>,
+        registered: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeStore {
+        fn set(&self, id: &str, f: impl FnOnce(&mut notification_policy::AppPrefs)) {
+            f(self.apps.lock().unwrap().entry(id.to_owned()).or_default());
+        }
+    }
+
+    impl PolicyStore for FakeStore {
+        fn app_for(&self, desktop_entry: &str, app_name: &str) -> Option<String> {
+            let apps = self.apps.lock().unwrap();
+            notification_policy::resolve_app(desktop_entry, app_name, |id| apps.contains_key(id))
+        }
+        fn global(&self) -> notification_policy::GlobalPrefs {
+            *self.global.lock().unwrap()
+        }
+        fn app(&self, app_id: &str) -> notification_policy::AppPrefs {
+            self.apps
+                .lock()
+                .unwrap()
+                .get(app_id)
+                .copied()
+                .unwrap_or_default()
+        }
+        fn register(&self, app_id: &str) {
+            let mut seen = self.registered.lock().unwrap();
+            if !seen.iter().any(|s| s == app_id) {
+                seen.push(app_id.to_owned());
+            }
+        }
+    }
+
+    fn incoming(entry: &str, title: &str, urgency: Urgency) -> Incoming {
+        Incoming {
+            app: "Sender".to_owned(),
+            title: title.to_owned(),
+            body: format!("{title} body"),
+            urgency,
+            desktop_entry: entry.to_owned(),
+            sound: Sound {
+                name: "message-new-instant".to_owned(),
+                file: String::new(),
+            },
+            ..Incoming::default()
+        }
+    }
+
+    fn policed() -> (NotificationCenter, Arc<FakeStore>) {
+        let store = Arc::new(FakeStore::default());
+        store.set("org.example.Mail", |_| {});
+        store.set("org.example.Chat", |_| {});
+        let mut c = center();
+        c.set_policy(store.clone());
+        (c, store)
+    }
+
+    #[test]
+    fn disabled_apps_are_dropped_and_others_register() {
+        let (mut c, store) = policed();
+        store.set("org.example.Chat", |a| a.enable = false);
+        let mail = c.deliver(incoming(
+            "org.example.Mail.desktop",
+            "Mail",
+            Urgency::Normal,
+        ));
+        let chat = c.deliver(incoming("org.example.Chat", "Chat", Urgency::Critical));
+        // The sender still gets an id, but nothing is filed or shown.
+        assert_ne!(chat, 0);
+        assert_ne!(chat, mail);
+        assert_eq!(c.history().iter().map(|n| n.id).collect::<Vec<_>>(), [mail]);
+        assert_eq!(c.banners().iter().map(|n| n.id).collect::<Vec<_>>(), [mail]);
+        assert_eq!(c.history()[0].app_id(), "org.example.Mail");
+        // Only the app that notified registers with GNOME Settings.
+        assert_eq!(*store.registered.lock().unwrap(), ["org.example.Mail"]);
+        // A generic sender registers nothing and follows the defaults.
+        c.deliver(incoming("", "Generic", Urgency::Normal));
+        assert_eq!(c.history().len(), 2);
+        assert_eq!(store.registered.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn per_app_banners_and_sounds_follow_settings_and_dnd() {
+        let (mut c, store) = policed();
+        store.set("org.example.Chat", |a| {
+            a.show_banners = false;
+        });
+        store.set("org.example.Mail", |a| a.enable_sound = false);
+        let mail = c.deliver(incoming("org.example.Mail", "Mail", Urgency::Normal));
+        let chat = c.deliver(incoming("org.example.Chat", "Chat", Urgency::Normal));
+        let generic = c.deliver(incoming("", "Generic", Urgency::Normal));
+        assert_eq!(
+            c.banners().iter().map(|n| n.id).collect::<Vec<_>>(),
+            [mail, generic]
+        );
+        // Mail is muted, chat had no banner: only the generic one sounds.
+        assert_eq!(c.take_sounds().len(), 1);
+        assert!(c.take_sounds().is_empty());
+        let _ = chat;
+        // Do Not Disturb holds every banner and sound but critical ones,
+        // which also break through the per-app banner switch.
+        c.set_dnd(true);
+        c.deliver(incoming("org.example.Mail", "Quiet", Urgency::Normal));
+        let crit = c.deliver(incoming("org.example.Chat", "Alarm", Urgency::Critical));
+        assert_eq!(c.banners().last().map(|n| n.id), Some(crit));
+        assert!(c.banners().last().unwrap().expanded);
+        assert_eq!(c.take_sounds().len(), 1);
+        // suppress-sound (an empty Sound) plays nothing.
+        let mut quiet = incoming("org.example.Chat", "Alarm 2", Urgency::Critical);
+        quiet.sound = Sound::default();
+        c.deliver(quiet);
+        assert!(c.take_sounds().is_empty());
+    }
+
+    #[test]
+    fn force_expanded_opens_the_banner() {
+        let (mut c, store) = policed();
+        store.set("org.example.Mail", |a| a.force_expanded = true);
+        let mail = c.deliver(incoming("org.example.Mail", "Mail", Urgency::Normal));
+        let chat = c.deliver(incoming("org.example.Chat", "Chat", Urgency::Normal));
+        let expanded = |id| c.history().iter().find(|n| n.id == id).unwrap().expanded;
+        assert!(expanded(mail));
+        assert!(!expanded(chat));
+    }
+
+    #[test]
+    fn disabling_an_app_later_drops_what_it_filed() {
+        let (mut c, store) = policed();
+        let mail = c.deliver(incoming("org.example.Mail", "Mail", Urgency::Normal));
+        let chat = c.deliver(incoming("org.example.Chat", "Chat", Urgency::Normal));
+        assert!(c.enforce_policy().is_empty());
+        store.set("org.example.Chat", |a| a.enable = false);
+        assert_eq!(c.enforce_policy(), [chat]);
+        assert_eq!(c.history().iter().map(|n| n.id).collect::<Vec<_>>(), [mail]);
+        assert!(c.banners().iter().all(|n| n.id == mail));
+        // An update sent by a disabled app takes the notification it
+        // replaces away and files nothing.
+        let mut again = incoming("org.example.Chat", "Chat 2", Urgency::Normal);
+        again.replaces_id = Some(mail);
+        c.deliver(again);
+        assert!(c.history().is_empty());
+    }
+
+    #[test]
+    fn lock_screen_follows_live_policy_and_acknowledgement() {
+        let (mut c, store) = policed();
+        let mail = c.deliver(incoming("org.example.Mail", "Invoice", Urgency::Normal));
+        let view = c.lock_screen();
+        assert_eq!(view.len(), 1);
+        assert_eq!((view[0].newest, view[0].count), (mail, 1));
+        assert!(view[0].details.is_none());
+        store.set("org.example.Mail", |a| a.details_in_lock_screen = true);
+        assert_eq!(
+            c.lock_screen()[0].details.as_deref(),
+            Some(&[("Invoice".to_owned(), "Invoice body".to_owned())][..])
+        );
+        store.global.lock().unwrap().show_in_lock_screen = false;
+        assert!(c.lock_screen().is_empty());
+        store.global.lock().unwrap().show_in_lock_screen = true;
+        c.acknowledge(&[mail]);
+        assert!(c.lock_screen().is_empty());
+    }
+
+    #[test]
+    fn app_identity_and_acknowledgement_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(QUEUE_FILE);
+        let (mut c, _store) = policed();
+        c.set_queue_path(path.clone());
+        let a = c.deliver(incoming("org.example.Mail", "A", Urgency::Normal));
+        let b = c.deliver(incoming("org.example.Mail", "B", Urgency::Normal));
+        c.acknowledge(&[a]);
+        let back = NotificationCenter::load(&path);
+        let by = |id| back.history().iter().find(|n| n.id == id).unwrap();
+        assert_eq!(by(b).app_id(), "org.example.Mail");
+        assert!(by(a).acknowledged() && !by(b).acknowledged());
     }
 
     #[test]

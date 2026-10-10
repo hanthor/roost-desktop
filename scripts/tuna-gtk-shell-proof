@@ -38,6 +38,8 @@
 #   G-NOTIFY-CLEAR   Clear empties the list
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
 #   G-NOTIFY-GROUP   two from one app group, collapsed; pressing expands
+#   G-NOTIFY-POLICY  per-app policy (#348): first notify registers the app,
+#                    disabling it drops banners and list entries
 #   G-QS-SERVICES    quick settings shows the tiles of the services on
 #                    the bus (stub daemons on a private system bus, #55)
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
@@ -1797,6 +1799,12 @@ notify() {
         --method org.freedesktop.Notifications.Notify \
         -- "Tuna Desktop Proof" 0 "" "$1" "$2" "[]" "{}" -1 >>"$ARTIFACTS/notify.log" 2>&1
 }
+notify_hinted() {
+    gdbus call --session --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        -- "Tuna Desktop Proof" 0 "" "$1" "$2" "[]" "{'desktop-entry': <'$POLICY_APP'>}" -1 >>"$ARTIFACTS/notify.log" 2>&1
+}
 open_calendar() {
     xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
     sleep 2
@@ -1911,6 +1919,58 @@ for _ in $(seq 1 20); do
     sleep 0.1
 done
 if showing "$ARTIFACTS/a11y-group-closed.json" "No Notifications"; then fail G-NOTIFY-GROUP "Escape did not close the calendar before opening quick settings"; fi
+
+# Per-app notification policy (#348): the first notification registers
+# the app in application-children so GNOME Settings lists it; disabling
+# the app drops its banners and keeps it out of the list.
+POLICY_APP="tuna-proof-notes"
+POLICY_DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+POLICY_DESKTOP_FILE="$POLICY_DESKTOP_DIR/$POLICY_APP.desktop"
+POLICY_CHILDREN_BEFORE=$(gsettings get org.gnome.desktop.notifications application-children)
+POLICY_BANNERS_BEFORE=$(gsettings get org.gnome.desktop.notifications show-banners)
+# Banners must be globally allowed for this gate; the key mirrors to the
+# DND toggle live, whatever the preceding gates left behind.
+gsettings set org.gnome.desktop.notifications show-banners true
+sleep 1
+mkdir -p "$POLICY_DESKTOP_DIR"
+printf '[Desktop Entry]\nName=Tuna Proof Notes\nExec=true\nType=Application\n' >"$POLICY_DESKTOP_FILE"
+notify_hinted "Policy First" "Filed while the app is enabled" || fail G-NOTIFY-POLICY "Notify call failed"
+sleep 1
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-first.json" 20 ||
+    fail G-NOTIFY-POLICY "accessibility dump failed"
+showing "$ARTIFACTS/a11y-policy-first.json" "Policy First" ||
+    fail G-NOTIFY-POLICY "no banner for a notification from an enabled app"
+gsettings get org.gnome.desktop.notifications application-children | grep -q "$POLICY_APP" ||
+    fail G-NOTIFY-POLICY "the first notification did not register the app in application-children"
+gsettings set "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/$POLICY_APP/" enable false
+sleep 1
+notify_hinted "Policy Held" "Dropped while the app is disabled" || fail G-NOTIFY-POLICY "Notify call failed"
+sleep 1
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-held.json" 20 ||
+    fail G-NOTIFY-POLICY "accessibility dump failed"
+if showing "$ARTIFACTS/a11y-policy-held.json" "Policy Held"; then
+    fail G-NOTIFY-POLICY "a disabled app's notification showed a banner"
+fi
+open_calendar
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-list.json" 20 ||
+    fail G-NOTIFY-POLICY "accessibility dump failed"
+showing "$ARTIFACTS/a11y-policy-list.json" "Policy First" ||
+    fail G-NOTIFY-POLICY "the enabled notification is missing from the list"
+if showing "$ARTIFACTS/a11y-policy-list.json" "Policy Held"; then
+    fail G-NOTIFY-POLICY "the disabled app's notification reached the list"
+fi
+pass G-NOTIFY-POLICY "first notify registers the app; disabling it drops banners and list entries"
+# Leave the list empty and the settings as found for the next gates.
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-policy-cleared.json" 20 \
+    --press "Clear" || fail G-NOTIFY-POLICY "could not press Clear"
+showing "$ARTIFACTS/a11y-policy-cleared.json" "No Notifications" ||
+    fail G-NOTIFY-POLICY "Clear did not empty the policy list"
+xdotool key Escape
+sleep 1
+gsettings set "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/$POLICY_APP/" enable true
+gsettings set org.gnome.desktop.notifications application-children "$POLICY_CHILDREN_BEFORE"
+gsettings set org.gnome.desktop.notifications show-banners "$POLICY_BANNERS_BEFORE"
+rm -f "$POLICY_DESKTOP_FILE"
 
 # Quick-settings services (#55): each toggle is read back from its daemon.
 sysprop() {
