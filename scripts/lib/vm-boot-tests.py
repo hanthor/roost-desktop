@@ -178,6 +178,56 @@ class OrcaReadFailure(unittest.TestCase):
                     actor.run("orca-read")
 
 
+class OrcaActivationCleanup(unittest.TestCase):
+    def test_reset_failure_keeps_observations_and_original_error(self):
+        observations = [{"enabled": True, "ready": False, "pid": 57}]
+        original = RuntimeError("original activation failure")
+        actor = SimpleNamespace(run=lambda action: (_ for _ in ()).throw(RuntimeError("private reset output")))
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaises(RuntimeError) as caught:
+                try:
+                    raise original
+                finally:
+                    lane.finish_orca_activation(actor, out, observations)
+            self.assertIs(caught.exception, original)
+            self.assertEqual(json.loads((Path(out) / "orca-activation.json").read_text()), observations)
+            receipt = (Path(out) / "orca-activation-cleanup.json").read_text()
+            self.assertNotIn("private", receipt)
+            self.assertEqual(json.loads(receipt), {"primary_error_type": "RuntimeError",
+                "cleanup_errors": [{"action": "orca-reset", "exception_type": "RuntimeError"}]})
+
+    def test_reset_failure_without_activation_error_still_fails(self):
+        actor = SimpleNamespace(run=lambda action: (_ for _ in ()).throw(RuntimeError("private output")))
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaisesRegex(RuntimeError, "Orca activation cleanup failed"):
+                lane.finish_orca_activation(actor, out, [])
+            self.assertEqual(json.loads((Path(out) / "orca-activation.json").read_text()), [])
+
+    def test_success_retains_observations_and_clean_reset_receipt(self):
+        calls = []
+        actor = SimpleNamespace(run=lambda action: calls.append(action))
+        with tempfile.TemporaryDirectory() as out:
+            lane.finish_orca_activation(actor, out, [])
+            self.assertEqual(calls, ["orca-reset"])
+            self.assertEqual(json.loads((Path(out) / "orca-activation-cleanup.json").read_text()),
+                             {"primary_error_type": None, "cleanup_errors": []})
+
+    def test_unwritable_evidence_does_not_replace_original_failure(self):
+        original = RuntimeError("original failure")
+        actor = SimpleNamespace(run=lambda action: None)
+        with tempfile.TemporaryDirectory() as out:
+            blocked = Path(out) / "not-a-directory"
+            blocked.write_text("file")
+            with self.assertRaises(RuntimeError) as caught:
+                try:
+                    raise original
+                finally:
+                    lane.finish_orca_activation(actor, str(blocked), [])
+            self.assertIs(caught.exception, original)
+            with self.assertRaisesRegex(RuntimeError, "orca-evidence-retention"):
+                lane.finish_orca_activation(actor, str(blocked), [])
+
+
 class ConstraintProofCleanup(unittest.TestCase):
     def test_original_error_survives_all_independent_cleanup_failures(self):
         calls = []

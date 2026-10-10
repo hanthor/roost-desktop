@@ -321,9 +321,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         record("V-ORCA-ACTIVATION", True,
                "live GNOME key starts/stops genuine distribution Orca; bus PID/UID, package hash, compositor parent and display verified")
     finally:
-        agent.run("orca-reset")
-        with open(os.path.join(evidence, "orca-activation.json"), "w") as stream:
-            json.dump(orca_observations, stream, indent=2)
+        finish_orca_activation(agent, evidence, orca_observations)
 
     # Real GNOME sound preference and virtual HDA/PipeWire data, not OSD state.
     amplified_observations = []
@@ -1168,6 +1166,30 @@ def restore_corner_mouse(qmp, original):
     if response != "" or len(current) != 1 or any(current[0].get(key) != original[key] for key in ("name", "index", "absolute")):
         raise RuntimeError("original QMP mouse handler was not restored")
     return {"original": original, "before": before, "after": after}
+
+
+def finish_orca_activation(agent, evidence, observations):
+    """Keep the activation failure and observations when reset also fails."""
+    primary = sys.exc_info()[1]
+    cleanup_errors = []
+    try:
+        agent.run("orca-reset")
+    except Exception as error:
+        # Transport errors may contain guest output. Retain only fixed action
+        # and exception class here; activation observations have their own
+        # bounded, privacy-checked receipt schema.
+        cleanup_errors.append({"action": "orca-reset", "exception_type": type(error).__name__})
+    try:
+        with open(os.path.join(evidence, "orca-activation.json"), "w") as stream:
+            json.dump(observations, stream, indent=2)
+        with open(os.path.join(evidence, "orca-activation-cleanup.json"), "w") as stream:
+            json.dump({"primary_error_type": type(primary).__name__ if primary else None,
+                       "cleanup_errors": cleanup_errors}, stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "orca-evidence-retention", "exception_type": type(error).__name__})
+        log("Orca activation evidence retention failed")
+    if primary is None and cleanup_errors:
+        raise RuntimeError("Orca activation cleanup failed: " + json.dumps(cleanup_errors))
 
 
 def finish_constraint_proof(agent, qmp, original_mouse, evidence, report):
