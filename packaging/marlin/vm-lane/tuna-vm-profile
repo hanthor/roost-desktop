@@ -1,0 +1,15 @@
+# Sourced by greetd for the CI test user. The selected tuna-session command
+# and all shipped binaries remain unchanged. Arch /bin/sh is verified Bash.
+export XDG_SESSION_TYPE=wayland
+export TUNA_COMPOSITOR_STATE="$XDG_RUNTIME_DIR/tuna-vm-state.json"
+export TUNA_LOCK_TRACE=1  # Safe submitted/result milestones, never input values.
+# tuna-rename: keep-begin
+# A published guest that still ships the pre-rename package (#505) reads
+# only the ROOST_ names; current guests would just log them as deprecated.
+if [ ! -x /usr/bin/tuna-compositor ]; then
+  export ROOST_COMPOSITOR_STATE="$TUNA_COMPOSITOR_STATE" ROOST_LOCK_TRACE=1
+fi
+# tuna-rename: keep-end
+# Preserve greetd's selected command, but capture its actual output in the
+# journal instead of losing it on the VT. No input or credentials are logged.
+exec > >(systemd-cat --identifier=tuna-vm-session) 2>&1

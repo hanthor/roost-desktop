@@ -6,6 +6,7 @@ import io
 import ast
 import base64
 import json
+import os
 import tempfile
 from pathlib import Path
 import unittest
@@ -16,6 +17,14 @@ loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__)
 spec = importlib.util.spec_from_loader(loader.name, loader)
 lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
+
+
+def guest_identity(prefix="tuna"):
+    """The lifecycle helper's shipped-identity globals for a guest prefix."""
+    compositor = f"{prefix}-compositor"
+    return {"PREFIX": prefix, "COMPOSITOR": compositor, "COMPOSITOR_COMM": compositor[:15],
+            "SHELL_GTK": f"{prefix}-shell-gtk", "NESTED": f"{prefix}-nested-",
+            "LOCK_PAM": f"/etc/pam.d/{prefix}-lock"}
 
 
 class OrcaUnreadyDiagnostic(unittest.TestCase):
@@ -42,7 +51,7 @@ class OrcaUnreadyDiagnostic(unittest.TestCase):
                          "/usr/bin/tuna-compositor" if path.parent.name == "87" else executable,
                          stat=lambda path: SimpleNamespace(st_dev=1, st_ino=next(executable_reads), st_size=100)),
                      "json": json, "subprocess": __import__("subprocess"),
-                     "call": lambda *args: package}
+                     "call": lambda *args: package, **guest_identity()}
             # Keep genuine file reads; only controlled /proc path/UID/exec fixtures substitute.
             exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), scope)
             original_stat = Path.stat
@@ -370,7 +379,8 @@ class RepeatedCoverage(unittest.TestCase):
             return SimpleNamespace(returncode=code)
 
         args = SimpleNamespace(out=str(root), boots=5, disk="disk.raw", timeout=30,
-                               tour=True, meta=[])
+                               tour=True, greeter_login=False, require_kvm=False,
+                               meta=[])
         with patch.object(lane.subprocess, "run", side_effect=boot):
             lane.repeat_boots(args)
 
@@ -449,6 +459,189 @@ class PciCapabilities(unittest.TestCase):
 
     def test_capability_cycle_is_bounded(self):
         self.assertTrue(self.probe(8, cycle=True)["no_soft_reset"])
+
+
+class ShippedSnapshotInventory(unittest.TestCase):
+    # Run 37696030597: the graphical PAM login produced a real greetd
+    # session, yet every inventory() probe failed because the published
+    # tuna-desktop 0.1.0-2 snapshot predates the newer instrumentation keys.
+    # Session detection must not hard-require keys the shipped binary
+    # never emits.
+    SHIPPED_STATE = {"locked": False, "windows": [], "focused": None,
+                     "active_workspace": 0, "overview_open": True}
+
+    def run_inventory(self, state, sessions, prefix="tuna"):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "inventory")
+        uid = os.getuid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc = root / "proc"
+            (proc / "1234").mkdir(parents=True)
+            identity = guest_identity(prefix)
+            (root / identity["COMPOSITOR"]).touch()
+            (proc / "1234/exe").symlink_to(root / identity["COMPOSITOR"])
+            fields = ["S", "1"] + ["0"] * 17 + ["4242"]
+            (proc / "1234/stat").write_text(f"1234 ({identity['COMPOSITOR_COMM']}) " + " ".join(fields))
+            state_path = root / "tuna-vm-state.json"
+            state_path.write_text(json.dumps(state))
+            descriptions = {
+                "1": "Id=1\nVTNr=1\nUser=959\nType=tty\nService=greetd\nClass=greeter",
+                "3": (f"Id=3\nVTNr=1\nUser={uid}\nType=tty\n"
+                      "Service=greetd\nClass=user"),
+                "4": (f"Id=4\nVTNr=\nUser={uid}\nType=unspecified\n"
+                      "Service=systemd-user\nClass=manager"),
+            }
+            def fake_call(*args, **kwargs):
+                if args[:2] == ("loginctl", "list-sessions"):
+                    return "".join(f"{sid} {line}\n" for sid, line in sessions)
+                if args[:2] == ("loginctl", "show-session"):
+                    return descriptions[args[2]]
+                raise AssertionError(f"unexpected probe: {args}")
+            import pathlib as real_pathlib
+            scope = {"json": json, "os": os,
+                     "pathlib": SimpleNamespace(
+                         Path=lambda path: proc if str(path) == "/proc" else real_pathlib.Path(path)),
+                     "OWNER": SimpleNamespace(pw_uid=uid, pw_name="tuna-test"),
+                     "RUNTIME": f"/run/user/{uid}", "STATE": state_path,
+                     "call": fake_call, **identity}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
+            return scope["inventory"]()
+
+    def test_shipped_snapshot_without_newer_keys_still_detects_session(self):
+        uid = os.getuid()
+        result = self.run_inventory(dict(self.SHIPPED_STATE), [
+            ("1", "959 greeter seat0 tty1"),
+            ("3", f"{uid} tuna-test seat0 tty1"),
+            ("4", f"{uid} tuna-test - -"),
+        ])
+        self.assertEqual(result["session"]["Id"], "3")
+        self.assertEqual(result["session"]["Service"], "greetd")
+        self.assertEqual(result["session_uid"], uid)
+        self.assertTrue(any(p["executable"] == "tuna-compositor" for p in result["processes"]))
+        self.assertTrue(result["state"]["overview_open"])
+        self.assertIsNone(result["state"]["pointer_position"])
+        self.assertIsNone(result["state"]["native_relative_motion_count"])
+
+    def test_published_guest_with_pre_rename_binaries_still_detects_session(self):
+        # The published flavor can still ship the package from before #505.
+        uid = os.getuid()
+        result = self.run_inventory(dict(self.SHIPPED_STATE), [
+            ("1", "959 greeter seat0 tty1"),
+            ("3", f"{uid} tuna-test seat0 tty1"),
+        ], prefix="roost")  # tuna-rename: keep
+        self.assertEqual(result["session"]["Id"], "3")
+        self.assertEqual([p["executable"] for p in result["processes"]],
+                         ["roost-compositor"])  # tuna-rename: keep
+
+    def test_missing_owner_session_still_rejected(self):
+        uid = os.getuid()
+        state = {**self.SHIPPED_STATE, "pointer_position": [0, 0],
+                 "native_relative_motion_count": 0}
+        with self.assertRaisesRegex(RuntimeError, "expected exactly one greetd user session"):
+            self.run_inventory(state, [("4", f"{uid} tuna-test - -")])
+
+
+class PreRenameGuestLog(unittest.TestCase):
+    # tuna-rename: keep-begin
+    # The published flavor can still ship binaries from before #505.
+    def test_pre_rename_binary_lines_read_as_current_names(self):
+        text = lane.normalize_guest_log(
+            "session[9]: roost-compositor: drm: output Virtual-1 1280x800\n"
+            "session[9]: roost-shell-gtk: keybindings: 64 grabs\n"
+            "tuna-vm-health: roost-test ready\n")
+        self.assertRegex(text, lane.DRM_RE)
+        self.assertRegex(text, lane.SHELL_RE)
+        self.assertIn("tuna-vm-health: roost-test ready", text)
+
+    def test_pre_rename_executables_compare_by_role(self):
+        self.assertEqual(lane.guest_role("roost-compositor"), "tuna-compositor")
+        self.assertEqual(lane.guest_role("tuna-shell-gtk"), "tuna-shell-gtk")
+        self.assertEqual(lane.guest_role("nautilus"), "nautilus")
+    # tuna-rename: keep-end
+
+
+class PredatingGuestQualification(unittest.TestCase):
+    # Run 37700332957: the published tuna-desktop 0.1.0-2 guest runs a healthy
+    # session whose snapshot reports every newer instrumentation key as
+    # None, and its shell moves no media-key volume. Newer-behavior gates
+    # qualify on such guests instead of failing the whole lifecycle; the
+    # current-build lane keeps proving them strictly.
+    SHIPPED_STATE = {"locked": False, "windows": [], "focused": None,
+                     "active_workspace": 0, "overview_open": False,
+                     "pointer_position": None, "native_relative_motion_count": None,
+                     "mouse_left_handed": None, "touchpad_left_handed": None,
+                     "hot_corners": None}
+    CURRENT_STATE = {"locked": False, "windows": [], "focused": None,
+                     "active_workspace": 0, "overview_open": False,
+                     "pointer_position": [0, 0], "native_relative_motion_count": 0,
+                     "mouse_left_handed": False, "touchpad_left_handed": False,
+                     "hot_corners": True}
+    STRICT_SERIAL = ("\n".join([
+        "tuna-vm-health: audio-hda ready",
+        "tuna-vm-health: volume=0.40",
+        "tuna-vm-health: volume=0.46",
+        "tuna-vm-health: volume=0.40",
+        "tuna-vm-health: volume=0.40 [MUTED]",
+        "tuna-vm-health: volume=0.40",
+    ]) + "\n")
+    BASELINE_SERIAL = ("tuna-vm-health: audio-hda ready\n"
+                       "tuna-vm-health: volume=0.40\n")
+
+    def verdict(self, text, state=None):
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = Path(directory) / "lifecycle"
+            lifecycle.mkdir()
+            if state is not None:
+                (lifecycle / "before.json").write_text(json.dumps({"state": state}))
+            return lane.media_volume_ok(text, str(lifecycle))
+
+    def test_predating_snapshot_qualifies(self):
+        self.assertTrue(lane.predates_newer_snapshot(dict(self.SHIPPED_STATE)))
+
+    def test_current_snapshot_stays_strict(self):
+        self.assertFalse(lane.predates_newer_snapshot(dict(self.CURRENT_STATE)))
+
+    def test_partial_snapshot_stays_strict(self):
+        # Fail closed: a guest with only some newer keys still takes the
+        # strict path rather than silently qualifying.
+        state = {**self.SHIPPED_STATE, "mouse_left_handed": False}
+        self.assertFalse(lane.predates_newer_snapshot(state))
+
+    def test_media_volume_strict_sequence_passes(self):
+        ok, detail = self.verdict(self.STRICT_SERIAL, self.CURRENT_STATE)
+        self.assertTrue(ok)
+        self.assertNotIn("predates", detail)
+
+    def test_media_volume_qualifies_on_predating_guest(self):
+        ok, detail = self.verdict(self.BASELINE_SERIAL, self.SHIPPED_STATE)
+        self.assertTrue(ok)
+        self.assertIn("predates", detail)
+
+    def test_media_volume_stays_strict_on_current_guest(self):
+        ok, _ = self.verdict(self.BASELINE_SERIAL, self.CURRENT_STATE)
+        self.assertFalse(ok)
+
+    def test_media_volume_stays_strict_without_predation_evidence(self):
+        ok, _ = self.verdict(self.BASELINE_SERIAL, None)
+        self.assertFalse(ok)
+
+    def test_lock_chord_held_until_lock_owns_input_on_predating_guest(self):
+        # Run 37727015469: a quick Super release on the 0.1.0-2 guest is
+        # dropped before the lock surface maps, latching Super so the
+        # password never reaches PAM. Hold the chord on such guests only.
+        self.assertGreaterEqual(lane.lock_chord_hold_ms(True), 1000)
+
+    def test_lock_chord_stays_quick_on_current_guest(self):
+        # Current guests keep exercising the quick-release regression path.
+        self.assertEqual(lane.lock_chord_hold_ms(False), 80)
+
+    def test_media_volume_requires_hda_and_baseline(self):
+        ok, _ = self.verdict("tuna-vm-health: volume=0.40\n", self.SHIPPED_STATE)
+        self.assertFalse(ok)
+        ok, _ = self.verdict("tuna-vm-health: audio-hda ready\n", self.SHIPPED_STATE)
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":
