@@ -867,6 +867,7 @@ impl Runtime {
                 SESSION_KIND_ENV,
                 match backend {
                     Backend::Winit(_) => "nested",
+                    #[cfg(feature = "drm")]
                     Backend::Drm(_) => "hardware",
                 },
             );
@@ -879,6 +880,7 @@ impl Runtime {
             use smithay::backend::renderer::ImportDma;
             let formats: Vec<_> = match &mut backend {
                 Backend::Winit(winit) => winit.renderer().dmabuf_formats().into_iter().collect(),
+                #[cfg(feature = "drm")]
                 Backend::Drm(drm) => drm.renderer.dmabuf_formats().into_iter().collect(),
             };
             state.enable_dmabuf(formats);
@@ -1701,7 +1703,7 @@ impl Runtime {
             .then(|| match &self.backend {
                 #[cfg(feature = "drm")]
                 Backend::Drm(drm) => Some(drm.relative_motion_events()),
-                Backend::Winit(_) => None,
+                Backend::Winit(_) => None::<u64>,
             })
             .flatten());
         doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
