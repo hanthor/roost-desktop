@@ -2066,6 +2066,21 @@ sleep 1
 command -v secret-tool >/dev/null || fail G-NM-ENTERPRISE "libsecret secret-tool is required"
 command -v gnome-keyring-daemon >/dev/null || fail G-NM-ENTERPRISE "GNOME Keyring is required"
 printf 'tuna-proof-keyring\n' | gnome-keyring-daemon --unlock --components=secrets --control-directory="$ARTIFACTS/keyring-control" >"$ARTIFACTS/keyring.log" 2>&1
+# The daemon's parent returns before the child owns org.freedesktop.secrets.
+# A lookup in that gap makes the bus activate a second, locked keyring
+# daemon whose store needs gcr-prompter, which has no display here (#528).
+# Wait until the name belongs to the daemon unlocked above.
+keyring_owns_secrets() {
+    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.NameHasOwner org.freedesktop.secrets 2>/dev/null | grep -q true || return 1
+    owner="$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.GetNameOwner org.freedesktop.secrets | sed -n "s/^('\(.*\)',)$/\1/p")"
+    pid="$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.GetConnectionUnixProcessID "$owner" | sed -n 's/^(uint32 \([0-9]*\),)$/\1/p')"
+    [ -n "$pid" ] && tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF -- "--control-directory=$ARTIFACTS/keyring-control"
+}
+for _ in $(seq 1 100); do keyring_owns_secrets && break; sleep 0.1; done
+keyring_owns_secrets || fail G-NM-ENTERPRISE "the unlocked GNOME Keyring never owned org.freedesktop.secrets"
 TUNA_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
 TUNA_NM_VPN_PROOF=1
 export TUNA_NM_VPN_PLUGIN_DIR TUNA_NM_VPN_PROOF
