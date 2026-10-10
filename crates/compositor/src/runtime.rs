@@ -1295,8 +1295,10 @@ impl Runtime {
                     self.control.set_overview(!self.control.overview_open());
                     #[cfg(feature = "drm")]
                     if matches!(self.backend, Backend::Drm(_)) {
-                        self.performance_trace
-                            .input(Duration::from(self.state.presentation_now()));
+                        self.performance_trace.input(
+                            Duration::from(self.state.presentation_now()),
+                            self.control.overview_open(),
+                        );
                     }
                 }
                 TriggerAction::Open => {
@@ -3366,6 +3368,8 @@ impl Runtime {
         };
         let show_paper = show_content && !overlay_visible && overview.is_none();
         #[cfg(feature = "drm")]
+        let overview_requested = self.control.overview_open();
+        #[cfg(feature = "drm")]
         let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
         let desktop = self.background_desktop();
         // Window clones (overview, switcher) and casts show windows the
@@ -3707,8 +3711,17 @@ impl Runtime {
                     out.trace_wake_submission();
                     out.pending = true;
                     if index == 0 {
-                        self.performance_trace
-                            .queued(Duration::from(self.state.presentation_now()));
+                        self.performance_trace.queued(
+                            Duration::from(self.state.presentation_now()),
+                            crate::performance_trace::CardReadiness {
+                                expected: cards.map(|layout| layout.cards.len()).or_else(|| {
+                                    (!overview_requested && overview.is_none()).then_some(0)
+                                }),
+                                rendered: if cards.is_some() { paper.len() } else { 0 },
+                                cached: self.wallpaper.card_counts().0,
+                                pending: self.wallpaper.card_counts().1,
+                            },
+                        );
                     }
                     out.last_frame = Some(signature);
                     self.frame_costs.insert(out.name.clone(), cost);

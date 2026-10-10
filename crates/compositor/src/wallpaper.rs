@@ -194,6 +194,12 @@ impl Wallpaper {
         Self::default()
     }
 
+    /// Counts only; benchmark observation must not start work or wait for it.
+    #[cfg(feature = "drm")]
+    pub(crate) fn card_counts(&self) -> (usize, usize) {
+        (self.cards.len(), self.card_pending.len())
+    }
+
     /// Bounded in-memory observations only. Never inspect an arbitrary source
     /// path from the frame/snapshot thread and never equate decoded pixels
     /// with a successfully painted desktop frame.

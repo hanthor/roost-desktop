@@ -401,6 +401,23 @@ def changed(before, after):
     return sum(abs(x-y) > 24 for x, y in zip(before[32*1280*3:], after[32*1280*3:])) > 1280*800*3*.10
 
 
+def overview_response_summary(observations):
+    """A broad pixel change is first response, not completed-card evidence."""
+    response = distribution([row["upper_s"] for row in observations])
+    return {
+        # Preserve the legacy field as a first-response alias for old reports.
+        "overview_observed_upper_s": response,
+        "overview_first_response_upper_s": response,
+        "overview_card_complete_scanout": {
+            "status": "unavailable",
+            "qualifies_completed_overview": False,
+            "reason": "native card readiness and associated primary presentation receipts not acquired",
+            "pre_input_preparation": "unobserved",
+            "startup_accounting": "unchanged whole-run CPU/RSS/PSS samples include preparation",
+        },
+    }
+
+
 def main():
     from perf_vm_lifetime import Handoff, cleanup_owned_vm
     ap = argparse.ArgumentParser()
@@ -498,7 +515,8 @@ def main():
                 if changed(before, after):
                     observations.append({"index": index, "action": "overview-open" if index % 2 == 0 else "overview-close",
                                          "lower_s": previous_start-start, "upper_s": poll_end-start,
-                                         "capture_s": poll_end-poll_start})
+                                         "capture_s": poll_end-poll_start,
+                                         "scope": "broad-first-response", "card_completion_verified": False})
                     qmp.frame(str(out / f"overview-{index:02d}.png"))
                     break
                 previous_start = poll_start
@@ -565,8 +583,8 @@ def main():
                   "drm_memory": drm_memory_summary(samples),
                   "presentation_cadence": pacing,
                   "gnome_overview_sysprof": gnome_trace_summary,
-                  "overview_observed_upper_s":distribution([s["upper_s"] for s in observations]),
-                  "limitations":["QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
+                  **overview_response_summary(observations),
+                  "limitations":["QMP observations measure broad first response only. A changed shell/dark background can precede async wallpaper cards; these observations do not qualify completed overview latency.",
                                  "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
                                  "RSS sums process resident sets and can double-count shared pages. PSS covers the test UID and excludes the observer and its descendants; root/GDM shared services are outside this scope.",
                                  "App search followed by fixed eight-second waits does not measure or prove application launch/readiness.",

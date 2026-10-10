@@ -61,6 +61,21 @@ def isolated_trace_start(directory, run_error=None, run_result=None):
         yield
 
 
+class OverviewResponseScope(unittest.TestCase):
+    def test_first_response_cannot_qualify_missing_async_cards(self):
+        result = host.overview_response_summary([{"upper_s": .001}])
+        self.assertEqual(result["overview_first_response_upper_s"], result["overview_observed_upper_s"])
+        receipt = result["overview_card_complete_scanout"]
+        self.assertEqual(receipt["status"], "unavailable")
+        self.assertFalse(receipt["qualifies_completed_overview"])
+        self.assertEqual(receipt["pre_input_preparation"], "unobserved")
+        self.assertIn("whole-run", receipt["startup_accounting"])
+
+    def test_even_a_prepared_looking_frame_needs_native_presentation_receipts(self):
+        result = host.overview_response_summary([{"upper_s": .1, "prepared": True, "cards_ready": True}])
+        self.assertFalse(result["overview_card_complete_scanout"]["qualifies_completed_overview"])
+
+
 class TraceFailureDiagnostics(unittest.TestCase):
     def receipt(self):
         return {'trace_failure':{'schema':1,'action':'start','stage':'start-call','error_class':'RuntimeError'}}
