@@ -95,10 +95,14 @@ def action(name, generation):
     temp.write_text(json.dumps(dict(action=name, generation=generation)))
     temp.replace(command)
 def require_owned_cleanup(cleanup):
-    if not cleanup["runtime_removed"] or not cleanup["accessibility_processes_stopped"]:
+    if not cleanup["runtime_removed"] or not cleanup["accessibility_processes_stopped"] or not cleanup["accessibility_identity_verified"]:
         raise AssertionError("owned proof session cleanup failed")
 
+def expected_missing_accessibility_owner(name, remote_error):
+    return name == "org.a11y.atspi.Registry" and remote_error == "org.freedesktop.DBus.Error.NameHasNoOwner"
+
 success = False
+owned_pidfds = []
 accessibility = None
 try:
     # Private session buses alone do not isolate the fixed AT-SPI runtime socket.
@@ -117,6 +121,7 @@ try:
     env["AT_SPI_BUS_ADDRESS"] = address
     accessibility = Gio.DBusConnection.new_for_address_sync(address,Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,None,None)
     bus_pid = accessibility.call_sync("org.freedesktop.DBus","/org/freedesktop/DBus","org.freedesktop.DBus","GetConnectionUnixProcessID",GLib.Variant("(s)",("org.freedesktop.DBus",)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0]
+    owned_pidfds.append(os.pidfd_open(bus_pid))
     manifest["session_isolation"] = {
         "runtime_directory":str(runtime), "runtime_mode":oct(runtime.stat().st_mode & 0o777),
         "session_bus":env.get("DBUS_SESSION_BUS_ADDRESS"), "accessibility_bus":address,
@@ -221,15 +226,18 @@ try:
     assert closed.getpixel(point) == baseline.getpixel(point), "interrupted map left an opaque ghost"
     success = True
 finally:
-    owned_accessibility_pids = []
+    owned_accessibility_pids = [manifest["session_isolation"]["accessibility_bus_pid"]] if "session_isolation" in manifest else []
+    cleanup_query_errors = []
     if accessibility:
-        for name in ("org.a11y.atspi.Registry","org.freedesktop.DBus"):
+        for name in ("org.a11y.atspi.Registry",):
             try:
                 owned_accessibility_pids.append(accessibility.call_sync("org.freedesktop.DBus","/org/freedesktop/DBus","org.freedesktop.DBus","GetConnectionUnixProcessID",GLib.Variant("(s)",(name,)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0])
-            except Exception:
-                pass
-    owned_pidfds = []
-    for pid in owned_accessibility_pids:
+            except GLib.Error as error:
+                if not expected_missing_accessibility_owner(name, Gio.DBusError.get_remote_error(error)):
+                    cleanup_query_errors.append(str(error))
+            except Exception as error:
+                cleanup_query_errors.append(str(error))
+    for pid in owned_accessibility_pids[1:]:
         try:
             owned_pidfds.append(os.pidfd_open(pid))
         except ProcessLookupError:
@@ -263,7 +271,7 @@ finally:
         except GLib.Error:
             pass
     shutil.rmtree(runtime)
-    manifest["owned_cleanup"] = {"runtime_removed":not runtime.exists(), "accessibility_pids":owned_accessibility_pids,"accessibility_processes_stopped":accessibility_stopped}
+    manifest["owned_cleanup"] = {"runtime_removed":not runtime.exists(), "accessibility_pids":owned_accessibility_pids,"accessibility_processes_stopped":accessibility_stopped, "accessibility_identity_verified":bool(owned_accessibility_pids) and not cleanup_query_errors, "query_errors":cleanup_query_errors}
     (art / "manifest.json").write_text(json.dumps(manifest,indent=2))
     for log in logs:
         log.close()
