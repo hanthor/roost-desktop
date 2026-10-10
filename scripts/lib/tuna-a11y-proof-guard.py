@@ -10,7 +10,9 @@ import time
 
 from gi.repository import Gio, GLib
 
-address, artifacts = sys.argv[1:]
+address, artifacts, *companions = sys.argv[1:]
+if len(companions) not in (0, 2):
+    raise ValueError('expected optional launcher and Xvfb process IDs')
 artifacts = Path(artifacts)
 connection = Gio.DBusConnection.new_for_address_sync(
     address,
@@ -35,6 +37,15 @@ try:
         pid = call("GetConnectionUnixProcessID", GLib.Variant("(s)", (name,)))
         fd = os.pidfd_open(pid)
         owned.append((name, pid, fd))
+    # Capture identities while these direct children are still owned by the
+    # harness. The launcher can ignore TERM after its bus has exited.
+    for name, raw_pid in zip(("accessibility-launcher", "xvfb"), companions):
+        pid = int(raw_pid)
+        fd = os.pidfd_open(pid)
+        owned.append((name, pid, fd))
+        parent = int(Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[1])
+        if parent != os.getppid():
+            raise RuntimeError(f'proof companion is not a direct harness child: {name}')
     identity = {
         "address": address,
         "owned": [{"service": name, "pid": pid, "pidfd_retained": True}

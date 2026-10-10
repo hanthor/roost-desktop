@@ -24,8 +24,35 @@ cleanup() {
         touch "$ARTIFACTS/guard-stop"
         if ! wait "$GUARD_PID"; then proof_status=1; fi
     fi
-    if [ -n "$AT_PID" ]; then kill "$AT_PID" 2>/dev/null || true; wait "$AT_PID" 2>/dev/null || true; fi
-    if [ -n "$X_PID" ]; then kill "$X_PID" 2>/dev/null || true; wait "$X_PID" 2>/dev/null || true; fi
+    # Also bound cleanup when guard startup failed before retaining companions.
+    if ! /usr/bin/python3 - "$AT_PID" "$X_PID" <<'PY_CHILDREN'
+import os, pathlib, select, signal, sys
+for raw in sys.argv[1:]:
+    if not raw:
+        continue
+    pid=int(raw)
+    try:
+        fd=os.pidfd_open(pid)
+    except ProcessLookupError:
+        continue
+    try:
+        poll=select.poll(); poll.register(fd, select.POLLIN)
+        if poll.poll(0):
+            continue
+        parent=int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()[1])
+        if parent != os.getppid():
+            raise RuntimeError('refusing to stop a process outside this proof')
+        signal.pidfd_send_signal(fd, signal.SIGTERM)
+        if not poll.poll(3000):
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+            if not poll.poll(3000):
+                raise RuntimeError('owned proof child did not exit')
+    finally:
+        os.close(fd)
+PY_CHILDREN
+    then proof_status=1; fi
+    if [ -n "$AT_PID" ]; then wait "$AT_PID" 2>/dev/null || true; fi
+    if [ -n "$X_PID" ]; then wait "$X_PID" 2>/dev/null || true; fi
     rm -rf "$XDG_RUNTIME_DIR"
     if [ -e "$XDG_RUNTIME_DIR" ]; then proof_status=1; fi
     /usr/bin/python3 - "$ARTIFACTS/manifest.json" <<'PY_CLEANUP'
@@ -69,7 +96,7 @@ assert os.environ['XDG_RUNTIME_DIR'] in os.environ['AT_SPI_BUS_ADDRESS']
 PY_ADDRESS
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 rm -f "$ARTIFACTS/guard-ready" "$ARTIFACTS/guard-stop"
-/usr/bin/python3 "$SCRIPT_DIR/lib/tuna-a11y-proof-guard.py" "$AT_SPI_BUS_ADDRESS" "$ARTIFACTS" >"$ARTIFACTS/guard.log" 2>&1 &
+/usr/bin/python3 "$SCRIPT_DIR/lib/tuna-a11y-proof-guard.py" "$AT_SPI_BUS_ADDRESS" "$ARTIFACTS" "$AT_PID" "$X_PID" >"$ARTIFACTS/guard.log" 2>&1 &
 GUARD_PID=$!
 for _ in $(seq 1 100); do
     [ -s "$ARTIFACTS/guard-ready" ] && break
