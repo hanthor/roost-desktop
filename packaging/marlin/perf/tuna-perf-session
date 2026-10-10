@@ -1,0 +1,4 @@
+#!/bin/sh
+# CI-only instrumentation; preserves tuna-session's login arguments/behavior.
+export TUNA_PERF_TRACE=1
+exec systemd-cat --identifier=tuna-perf-compositor /usr/bin/tuna-session

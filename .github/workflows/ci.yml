@@ -43,6 +43,7 @@ jobs:
       - run: python3 scripts/lib/mutter-profiler-integrity-tests.py
       - run: python3 scripts/lib/tuna-perf-payload-tests.py
       - run: python3 scripts/lib/tuna-perf-reference-tests.py
+      - run: python3 scripts/lib/tuna-overview-receipt-tests.py
       - run: python3 scripts/lib/tuna-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
       - run: python3 scripts/lib/tuna-pipewire-dump-tests.py
