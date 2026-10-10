@@ -770,14 +770,14 @@ impl ScreenshotUi {
             .window
             .borrow()
             .clone()
-            .unwrap_or_else(|| Self::new_window(&self.app, &self.overlay));
+            .unwrap_or_else(|| self.new_window());
         *self.window.borrow_mut() = Some(window.clone());
         window.present();
     }
 
-    fn new_window(app: &gtk::Application, overlay: &gtk::Overlay) -> gtk::Window {
+    fn new_window(self: &Rc<Self>) -> gtk::Window {
         let window = gtk::Window::new();
-        window.set_application(Some(app));
+        window.set_application(Some(&self.app));
         window.add_css_class("tuna-screenshot-ui");
         window.set_title(Some("Screenshot"));
         window.init_layer_shell();
@@ -789,7 +789,33 @@ impl ScreenshotUi {
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::Exclusive);
 
-        window.set_child(Some(overlay));
+        window.set_child(Some(&self.overlay));
+        // The layer-shell `closed` event becomes an xdg-toplevel close
+        // request. Retire that surface through the same path as Escape.
+        let weak = Rc::downgrade(self);
+        window.connect_close_request(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.close();
+            }
+            glib::Propagation::Stop
+        });
+        // Also cover direct GTK destruction: a destroyed window must never
+        // remain in the slot and be reused by a later screenshot request.
+        let weak = Rc::downgrade(self);
+        window.connect_destroy(move |window| {
+            if let Some(ui) = weak.upgrade() {
+                let current = ui
+                    .window
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|current| current == window);
+                if current {
+                    ui.window.borrow_mut().take();
+                    window.set_child(None::<&gtk::Widget>);
+                    ui.close();
+                }
+            }
+        });
         window
     }
 
@@ -1038,6 +1064,70 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a supervised GTK test process inside a Wayland layer-shell session"]
+    fn external_close_and_destroy_retire_the_screenshot_window() {
+        let _control = crate::attach_control().expect("supervised shell control handshake");
+        gtk::init().expect("GTK display");
+        let app = gtk::Application::builder()
+            .application_id("org.tuna.ScreenshotLifecycleTest")
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let notify: Notify = Rc::new(|_, _| {});
+        let ui = ScreenshotUi::new(
+            &app,
+            Rc::new(|| {}),
+            notify.clone(),
+            Recorder::new(notify),
+            Rc::new(|_| {}),
+        );
+        let context = glib::MainContext::default();
+        let mapped = |window: &gtk::Window| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !window.is_mapped() && std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(window.is_mapped(), "screenshot layer must map");
+        };
+        ui.show(false);
+        let first = ui.window.borrow().clone().unwrap();
+        mapped(&first);
+        first.close();
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(
+            ui.window.borrow().is_none(),
+            "close-request must retire window"
+        );
+        assert!(ui.overlay.parent().is_none());
+
+        ui.show(false);
+        let second = ui.window.borrow().clone().unwrap();
+        assert_ne!(first, second, "reopen must create a fresh layer window");
+        mapped(&second);
+        second.destroy();
+        assert!(
+            ui.window.borrow().is_none(),
+            "direct destroy must retire window"
+        );
+        assert!(ui.overlay.parent().is_none());
+
+        ui.show(false);
+        let third = ui.window.borrow().clone().unwrap();
+        assert_ne!(second, third);
+        mapped(&third);
+        ui.close();
+        if let Some(path) = std::env::var_os("TUNA_SCREENSHOT_LIFECYCLE_RECEIPT") {
+            std::fs::write(
+                path,
+                "external close, direct destroy and fresh reopen passed\n",
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn the_first_selection_is_a_centred_quarter() {
