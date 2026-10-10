@@ -2789,6 +2789,65 @@ impl Runtime {
         }
     }
 
+    /// Private shell feedback remains inside the currently mapped screenshot
+    /// overlay. Recheck the lock and surface after draining the command queue.
+    fn move_screenshot_pointer(&mut self, x: i32, y: i32) {
+        if self.is_locked() || x < 0 || y < 0 {
+            return;
+        }
+        let Some(surface) = crate::layer::exclusive_keyboard_layer(&self.state) else {
+            return;
+        };
+        if !self.state.panel_surfaces().into_iter().any(|record| {
+            record.surface == surface
+                && record.namespace == tuna_shell_control::SCREENSHOT_NAMESPACE
+        }) {
+            return;
+        }
+        let Some((_, origin, _)) = crate::layer::layer_layout(&self.state)
+            .into_iter()
+            .find(|(s, _, _)| *s == surface)
+        else {
+            return;
+        };
+        let Some(size) = self
+            .state
+            .layer_surfaces()
+            .into_iter()
+            .find(|s| *s.wl_surface() == surface)
+            .and_then(|s| s.current_state().size)
+        else {
+            return;
+        };
+        if x >= size.w || y >= size.h {
+            return;
+        }
+        let pos = (
+            f64::from(origin.0) + f64::from(x),
+            f64::from(origin.1) + f64::from(y),
+        );
+        let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+        self.manager
+            .pointer_motion(&mut self.state, pos.into(), time);
+        let applied = self.manager.pointer_pos();
+        // Winit displays the host cursor; seat state alone leaves it behind.
+        match &self.backend {
+            Backend::Winit(backend) => {
+                let size = backend.window_size();
+                let logical = self.state.desktop_size();
+                let physical = smithay::reexports::winit::dpi::PhysicalPosition::new(
+                    applied.x * f64::from(size.w) / f64::from(logical.0.max(1)),
+                    applied.y * f64::from(size.h) / f64::from(logical.1.max(1)),
+                );
+                if let Err(error) = backend.window().set_cursor_position(physical) {
+                    eprintln!("tuna-compositor: screenshot cursor relocation: {error}");
+                }
+            }
+            #[cfg(feature = "drm")]
+            Backend::Drm(_) => {}
+        }
+    }
+
     /// Apply GNOME's input settings (#60): the seat's keymap and key
     /// repeat, libinput pointer devices (hardware), the hot corner.
     fn apply_input_settings(&mut self, settings: tuna_shell_control::InputSettings) {
@@ -3041,6 +3100,9 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some((x, y)) = outcome.screenshot_pointer {
+            self.move_screenshot_pointer(x, y);
         }
         if let Some(enabled) = outcome.screen_reader {
             #[cfg(feature = "drm")]

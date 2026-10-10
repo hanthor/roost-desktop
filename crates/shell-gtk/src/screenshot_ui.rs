@@ -203,6 +203,7 @@ pub struct ScreenshotUi {
     shoot_window: Rc<dyn Fn()>,
     notify: Notify,
     recorder: Rc<Recorder>,
+    move_pointer: Rc<dyn Fn((f64, f64))>,
 }
 
 fn icon_label_button(icon: &str, label: &str) -> gtk::ToggleButton {
@@ -225,6 +226,7 @@ impl ScreenshotUi {
         shoot_window: Rc<dyn Fn()>,
         notify: Notify,
         recorder: Rc<Recorder>,
+        move_pointer: Rc<dyn Fn((f64, f64))>,
     ) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
@@ -341,6 +343,7 @@ impl ScreenshotUi {
             shoot_window,
             notify,
             recorder,
+            move_pointer,
         });
 
         {
@@ -497,6 +500,9 @@ impl ScreenshotUi {
                             ui.selection.set(Some(rect));
                             ui.describe_selection();
                             ui.canvas.queue_draw();
+                            (ui.move_pointer)(
+                                selection.cursor(modifiers.contains(gdk::ModifierType::ALT_MASK)),
+                            );
                         } else if !modifiers.intersects(
                             gdk::ModifierType::ALT_MASK
                                 | gdk::ModifierType::CONTROL_MASK

@@ -1444,6 +1444,7 @@ fn build(app: &adw::Application) {
     let screenshot_ui = {
         let notify_shot = notify.clone();
         let notify_post = notify.clone();
+        let pointer_shell = shell.clone();
         screenshot_ui::ScreenshotUi::new(
             app.upcast_ref(),
             Rc::new(move || take_screenshot(true, notify_shot.clone())),
@@ -1451,6 +1452,11 @@ fn build(app: &adw::Application) {
                 notify_post.post("Screenshot", "screenshot-recorded-symbolic", summary, body);
             }),
             recorder.clone(),
+            Rc::new(move |(x, y)| {
+                if let Some(control) = pointer_shell.borrow_mut().control.as_mut() {
+                    let _ = control.move_screenshot_pointer(x, y);
+                }
+            }),
         )
     };
 

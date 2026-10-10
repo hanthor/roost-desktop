@@ -73,6 +73,25 @@ impl SelectionKeys {
         }
     }
 
+    /// GNOME places the cursor at the moved area's centre or at the
+    /// currently selected endpoint's edge, including after edge crossing.
+    /// ClutterSeat.warp_pointer takes integer pixels.
+    pub fn cursor(self, move_area: bool) -> (f64, f64) {
+        let centre = (
+            ((self.start.0 + self.last.0) / 2.0).floor(),
+            ((self.start.1 + self.last.1) / 2.0).floor(),
+        );
+        if move_area {
+            return centre;
+        }
+        match self.side {
+            Direction::Left => (self.start.0, centre.1),
+            Direction::Right => (self.last.0, centre.1),
+            Direction::Up => (centre.0, self.start.1),
+            Direction::Down => (centre.0, self.last.1),
+        }
+    }
+
     pub fn adjust(
         &mut self,
         direction: Direction,
@@ -269,5 +288,18 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn cursor_follows_selected_endpoint_across_edges_and_centres_moves() {
+        let mut keys = SelectionKeys::new(initial_selection(1280.0, 800.0));
+        keys.adjust(Direction::Left, false, false, false, (1280.0, 800.0));
+        assert_eq!(keys.cursor(false), (475.0, 399.0));
+        assert_eq!(keys.cursor(true), (637.0, 399.0));
+        keys.adjust(Direction::Right, false, false, true, (1280.0, 800.0));
+        // The oriented left endpoint now lies to the right of its opposite.
+        assert_eq!(keys.cursor(false), (1279.0, 399.0));
+        keys.adjust(Direction::Down, false, false, false, (1280.0, 800.0));
+        assert_eq!(keys.cursor(false), (1039.0, 499.0));
     }
 }

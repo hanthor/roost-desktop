@@ -590,3 +590,32 @@ fn private_tempdir() -> tempfile::TempDir {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     dir
 }
+
+#[test]
+fn screenshot_pointer_command_rejects_negative_local_coordinates() {
+    let mut model = StateModel::new();
+    let (conn, mut client) = pair();
+    let mut session = handshake(conn, &mut client, &model);
+    let _ = client_read(&mut client);
+    let _ = client_read(&mut client);
+    for (id, x, y, valid) in [(1, 475, 399, true), (2, -1, 0, false), (3, 0, -1, false)] {
+        client_write(
+            &mut client,
+            &Message::Command {
+                id,
+                kind: CommandKind::MoveScreenshotPointer { x, y },
+            },
+        );
+        assert!(matches!(session.handle_next(&mut model).unwrap(),
+            Handled::CommandResult { applied, .. } if applied == valid));
+        let Message::CommandResult {
+            id: reply_id,
+            status,
+        } = client_read(&mut client)
+        else {
+            panic!("expected command result");
+        };
+        assert_eq!(reply_id, id);
+        assert_eq!(matches!(status, CommandStatus::Applied), valid);
+    }
+}

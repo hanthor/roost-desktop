@@ -380,6 +380,19 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Move the cursor within the screenshot overlay after keyboard selection.
+    pub fn move_screenshot_pointer(&mut self, x: f64, y: f64) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::MoveScreenshotPointer {
+                x: x.floor() as i32,
+                y: y.floor() as i32,
+            },
+        })?;
+        Ok(id)
+    }
+
     /// Send GNOME's input settings (#60). Returns the request id.
     pub fn set_input_settings(
         &mut self,
@@ -1474,6 +1487,21 @@ mod tests {
         }
         // Toggle needs no selection: it works on an empty model too.
         assert_eq!(client.model().selected(), None);
+    }
+
+    #[test]
+    fn screenshot_pointer_command_uses_gnome_integer_cursor_positions() {
+        let (mut client, mut peer) = handshook();
+        let id = client
+            .move_screenshot_pointer(475.0, 399.5)
+            .expect("pointer");
+        assert_eq!(
+            server_read(&mut peer),
+            Message::Command {
+                id,
+                kind: CommandKind::MoveScreenshotPointer { x: 475, y: 399 },
+            }
+        );
     }
 
     #[test]

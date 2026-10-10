@@ -267,6 +267,7 @@ pub struct Session<'a> {
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<tuna_shell_control::InputSettings>,
     screen_reader: Option<bool>,
+    screenshot_pointer: Option<(i32, i32)>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
     /// The switcher's thumbnail frames, when the shell sent new ones.
@@ -340,6 +341,7 @@ impl<'a> Session<'a> {
             unlock_pending: None,
             input_settings: None,
             screen_reader: None,
+            screenshot_pointer: None,
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
             switcher_keys: None,
@@ -581,6 +583,26 @@ impl<'a> Session<'a> {
                 })?;
                 let revision = self.send_snapshot(model)?;
                 Ok(Handled::HelloResync { revision })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::MoveScreenshotPointer { x, y },
+            } => {
+                let valid = x >= 0 && y >= 0;
+                if valid {
+                    self.screenshot_pointer = Some((x, y));
+                }
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: if valid {
+                        CommandStatus::Applied
+                    } else {
+                        CommandStatus::Denied {
+                            reason: "invalid screenshot pointer coordinates".into(),
+                        }
+                    },
+                })?;
+                Ok(Handled::CommandResult { id, applied: valid })
             }
             Message::Command {
                 id,
@@ -960,6 +982,7 @@ fn apply_command(
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
+        | CommandKind::MoveScreenshotPointer { .. }
         | CommandKind::SetScreenReader { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
@@ -997,6 +1020,7 @@ pub struct PollOutcome {
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<tuna_shell_control::InputSettings>,
     pub screen_reader: Option<bool>,
+    pub screenshot_pointer: Option<(i32, i32)>,
     /// Accelerator grabs the shell sent, if they changed.
     pub accelerators: Option<Vec<tuna_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
@@ -1421,6 +1445,9 @@ impl ControlHub {
                     }
                     if let Some(settings) = session.input_settings.take() {
                         outcome.input_settings = Some(settings);
+                    }
+                    if let Some(pos) = session.screenshot_pointer.take() {
+                        outcome.screenshot_pointer = Some(pos);
                     }
                     if let Some(enabled) = session.screen_reader.take() {
                         outcome.screen_reader = Some(enabled);

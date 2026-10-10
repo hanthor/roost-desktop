@@ -3,6 +3,7 @@
 #
 # Usage:
 #   scripts/tuna-gtk-shell-proof [--display :N] [--artifacts DIR]
+#   --screenshot-keys-only runs panel readiness and actual keyboard captures only.
 #
 # Runs the nested compositor with tuna-shell-gtk as its supervised shell
 # on a private session bus with the AT-SPI accessibility bus, then:
@@ -171,10 +172,12 @@ ARTIFACTS="$ROOT/gtk-shell-artifacts"
 WIDTH=1280
 HEIGHT=800
 INSTALLED_PACKAGE=0
+SCREENSHOT_KEYS_ONLY=0
 COMPANIONS="$ROOT/target/debug/examples"
 while [ $# -gt 0 ]; do
     case "$1" in
         --installed-package) INSTALLED_PACKAGE=1; shift ;;
+        --screenshot-keys-only) SCREENSHOT_KEYS_ONLY=1; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
@@ -345,6 +348,23 @@ fail() {
     exit 1
 }
 
+showing() {
+    jq -e --arg n "$2" 'any(.[]; .name == $n and .showing)' "$1" >/dev/null
+}
+
+cstate() {
+    end=$(($(date +%s) + ${3:-20}))
+    while [ "$(date +%s)" -le "$end" ]; do
+        [ -s "$CSTATE" ] && jq -e "$1" "$CSTATE" >/dev/null 2>&1 && return 0
+        sleep 0.3
+    done
+    echo "tuna-gtk-shell-proof: compositor state was:" >&2
+    cat "$CSTATE" >&2 2>/dev/null || true
+    return 1
+}
+
+. "$ROOT/scripts/lib/tuna-screenshot-keys-proof.sh"
+
 # pyatspi ships with the distro Python, which a user-local Python
 # (Homebrew, pyenv) may shadow on PATH.
 PY=/usr/bin/python3
@@ -362,7 +382,7 @@ fi
 
 [ -n "$DISPLAY_ARG" ] && DISPLAY="$DISPLAY_ARG" && export DISPLAY
 if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
-    DISPLAY=":96"
+    DISPLAY="${DISPLAY_ARG:-:96}"
     export DISPLAY
     Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
     OWNED_XVFB=$!
@@ -644,8 +664,10 @@ rm -f "$TUNA_ANIMATION_CLOCK"
 export TUNA_ANIMATION_CLOCK
 if [ "$INSTALLED_PACKAGE" = 0 ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-shell-gtk -p tuna-shell-host
-    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
-    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
+    if [ "$SCREENSHOT_KEYS_ONLY" = 0 ]; then
+        cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example icon-probe
+        cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor --example shortcut-inhibit-client
+    fi
 fi
 if [ -n "$PAM_ON" ]; then
     env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
@@ -661,7 +683,7 @@ COMPOSITOR_PID=$!
 WID=""
 for _ in $(seq 1 60); do
     kill -0 "$COMPOSITOR_PID" 2>/dev/null || fail G-PANEL "compositor exited during startup"
-    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+    WID="$(xdotool search --pid "$COMPOSITOR_PID" --name Smithay 2>/dev/null | head -1 || true)"
     [ -n "$WID" ] && break
     sleep 1
 done
@@ -714,6 +736,31 @@ fi
 # controls; that also proves the accessible tree.
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-panel.json" 60 ||
     fail A11Y-PANEL "shell never registered on the accessibility bus"
+if [ "$SCREENSHOT_KEYS_ONLY" = 1 ]; then
+    cstate '.active_workspace != null and .locked == false' "screenshot desktop ready" ||
+        fail G-SCREENSHOT-KEYS "desktop never became ready"
+    if [ "$INSTALLED_PACKAGE" = 0 ]; then
+        "$PY" - "$ROOT" "$ARTIFACTS/screenshot-keys-source.json" <<'SCREENSHOT_SOURCE'
+import hashlib, json, pathlib, subprocess, sys
+root, output = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+def git(*args):
+    return subprocess.check_output(["git", "-C", str(root), *args])
+proof = {
+    "qualification_scope": "nested GTK screenshot keyboard controls; not hardware or installed-image qualification",
+    "source_commit": git("rev-parse", "HEAD").decode().strip(),
+    "source_diff_sha256": hashlib.sha256(git("diff", "HEAD", "--binary")).hexdigest(),
+    "binaries": {
+        name: hashlib.sha256((root / "target/debug" / name).read_bytes()).hexdigest()
+        for name in ("tuna-compositor", "tuna-shell-gtk")
+    },
+}
+output.write_text(json.dumps(proof, indent=2) + "\n")
+SCREENSHOT_SOURCE
+    fi
+    screenshot_keys_proof
+    exit 0
+fi
+
 sleep 2
 scrot "$ARTIFACTS/01-panel.png" >/dev/null
 # GNOME 51's top bar is pure black; the session background is not. An
@@ -762,9 +809,6 @@ pass G-WALLPAPER-URI "spaces, Unicode and literal percent escapes identify the a
 
 # A popover counts as open only when its contents are showing in the
 # accessible tree: a pixel diff passes on a mere hover highlight.
-showing() {
-    jq -e --arg n "$2" 'any(.[]; .name == $n and .showing)' "$1" >/dev/null
-}
 
 xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
 sleep 2
@@ -905,16 +949,6 @@ xdotool key Escape
 sleep 1
 
 # App stages: three libadwaita windows (scripts/lib/tuna-test-window.py).
-cstate() {
-    end=$(($(date +%s) + ${3:-20}))
-    while [ "$(date +%s)" -le "$end" ]; do
-        [ -s "$CSTATE" ] && jq -e "$1" "$CSTATE" >/dev/null 2>&1 && return 0
-        sleep 0.3
-    done
-    echo "tuna-gtk-shell-proof: compositor state was:" >&2
-    cat "$CSTATE" >&2 2>/dev/null || true
-    return 1
-}
 # Reserving an X11 display must not launch a compatibility process. The
 # panel/calendar are already real native Wayland clients at this point.
 if command -v Xwayland >/dev/null 2>&1; then
@@ -4052,62 +4086,7 @@ dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -
 [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT-UI "the Screen capture is $dims, not $WIDTH,$HEIGHT"
 pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save the whole screen"
 
-# Drive the real exclusive-keyboard overlay and inspect the saved PNG,
-# rather than treating a preference write or geometry helper as UI proof.
-while IFS='|' read -r shot_keys shot_dims shot_position shot_label; do
-    shot_workspace="$(jq -r '.active_workspace' "$CSTATE")"
-    sleep 1.1 # GNOME filenames have one-second resolution.
-    marker="$ARTIFACTS/shot-keys-$shot_label.marker"
-    touch "$marker"
-    xdotool key Print
-    end=$(($(date +%s) + 20))
-    until "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label.json" 5 >/dev/null 2>&1 &&
-        showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
-    showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" ||
-        fail G-SCREENSHOT-KEYS "Print did not open selection for $shot_label"
-    xdotool key --clearmodifiers s r
-    # Intentional word splitting: the fixture is a list of xdotool keys.
-    # shellcheck disable=SC2086
-    xdotool key --clearmodifiers $shot_keys
-    # xdotool finishes sending X events before the nested Wayland client
-    # and AT-SPI have necessarily processed the entire chord sequence.
-    # Observe completion without replaying keys or accepting partial geometry.
-    end=$(($(date +%s) + 10))
-    shot_attempt=0
-    while :; do
-        shot_attempt=$((shot_attempt + 1))
-        shot_observation="$ARTIFACTS/a11y-shot-keys-$shot_label-observation-$shot_attempt.json"
-        "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$shot_observation" 5 ||
-            fail G-SCREENSHOT-KEYS "selection accessibility dump failed for $shot_label"
-        cp "$shot_observation" "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json"
-        showing "$shot_observation" \
-            "Selected area at x ${shot_position%,*}, y ${shot_position#*,}, width ${shot_dims%,*}, height ${shot_dims#*,}" && break
-        [ "$(date +%s)" -lt "$end" ] ||
-            fail G-SCREENSHOT-KEYS "$shot_label did not move/resize to the expected area"
-        sleep 0.2
-    done
-    cstate ".active_workspace == $shot_workspace and (.overview_open | not)" "screenshot keeps workspace" ||
-        fail G-SCREENSHOT-KEYS "$shot_label navigation escaped into desktop shortcuts"
-    scrot "$ARTIFACTS/shot-keys-$shot_label-overlay.png" >/dev/null
-    xdotool key --clearmodifiers Return
-    end=$(($(date +%s) + 15))
-    newest=""
-    while [ "$(date +%s)" -le "$end" ]; do
-        newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$marker" 2>/dev/null | head -1)"
-        [ -n "$newest" ] && break
-        sleep 0.3
-    done
-    [ -n "$newest" ] || fail G-SCREENSHOT-KEYS "$shot_label captured nothing"
-    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
-    [ "$dims" = "$shot_dims" ] || fail G-SCREENSHOT-KEYS "$shot_label saved $dims, expected $shot_dims"
-    cp "$newest" "$ARTIFACTS/shot-keys-$shot_label.png"
-done <<EOF
-ctrl+Left ctrl+Right Left|$((WIDTH / 4 + 5)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 - 5)),$((HEIGHT * 3 / 8))|resize
-alt+ctrl+Right alt+shift+Down|$((WIDTH / 4)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 + 1)),$((HEIGHT * 3 / 4))|move
-shift+Left|$((WIDTH * 5 / 8)),$((HEIGHT / 4))|0,$((HEIGHT * 3 / 8))|edge
-ctrl+Left r|$((WIDTH / 4)),$((HEIGHT / 4))|$((WIDTH * 3 / 8)),$((HEIGHT * 3 / 8))|reset
-EOF
-pass G-SCREENSHOT-KEYS "arrows, Ctrl, Alt, Shift and R produce actual captures with bounded selection dimensions"
+screenshot_keys_proof
 
 # GNOME's window selector: Window lays the windows out as previews with
 # the focused one chosen; choosing another test window and Capture saves
