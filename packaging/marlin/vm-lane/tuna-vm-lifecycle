@@ -82,9 +82,12 @@ def inventory():
     for line in sessions:
         if len(line) < 2 or line[1] != str(OWNER.pw_uid):
             continue
+        # Every runuser probe opens a short logind session for this UID, and
+        # one may close between list-sessions and show-session. A vanished
+        # session yields no properties; the single greetd session still must.
         description = call("loginctl", "show-session", line[0], "--property=Id",
                            "--property=VTNr", "--property=User", "--property=Type",
-                           "--property=Service", "--property=Class")
+                           "--property=Service", "--property=Class", check=False)
         properties = dict(item.split("=", 1) for item in description.splitlines())
         if (properties.get("Service") == "greetd" and properties.get("VTNr") == "1"
                 and properties.get("User") == str(OWNER.pw_uid)
@@ -282,6 +285,21 @@ def orca_observation():
         result["unready_child_diagnostic"] = orca_child_diagnostic(state, pid)
     if pid == 0 or not owner:
         return result
+    name, path, version_prefix, owner, owner_reply = contracts[0]
+    try:
+        return owned_orca_observation(result, state, pid, contracts)
+    except subprocess.CalledProcessError:
+        # A starting or stopping reader can drop its unique name between two
+        # bus calls. Only a failure against an unchanged owner is an error.
+        current = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                       "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
+                       "s", name, user=True, check=False)
+        if current == owner_reply:
+            raise
+        return {**result, "owner": None, "owner_changed": True}
+
+
+def owned_orca_observation(result, state, pid, contracts):
     name, path, version_prefix, owner, owner_reply = contracts[0]
     # Two supported names may only coexist for the same original owned child.
     for contract in contracts:
