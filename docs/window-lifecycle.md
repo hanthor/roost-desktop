@@ -45,7 +45,10 @@ dbus-run-session -- scripts/tuna-window-lifecycle-proof \
   --bin-dir target/debug --display :95 --artifacts /tmp/tuna-window-lifecycle
 ```
 
-The runtime proof owns a private X server, settings and runtime directory.
+The runtime proof owns a private X server, settings and 0700 runtime directory.
+A dedicated accessibility bus is launched and its explicit address is passed
+to every GTK process. The manifest records both bus identities and owned
+cleanup, following the project isolation convention.
 It freezes the existing compositor animation clock, maps a real GTK native
 window and transient, advances the clock through their durations, exits the
 client, and checks screenshots for the retained final frame, half-way fade

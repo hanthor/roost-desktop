@@ -12,6 +12,10 @@ from pathlib import Path
 import subprocess
 import shutil
 import hashlib
+import signal
+import select
+import gi
+from gi.repository import Gio, GLib
 import time
 from PIL import Image
 p = argparse.ArgumentParser(description=__doc__)
@@ -61,7 +65,7 @@ logs = []
 def spawn(args, name, extra=None):
     log = (art / f"{name}.log").open("w")
     logs.append(log)
-    proc = subprocess.Popen(args, env=env | (extra or {}), stdout=log, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(args, env=env | (extra or {}), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     processes.append(proc)
     return proc
 def wait(check, label):
@@ -89,7 +93,30 @@ def action(name, generation):
     temp = art / "command.tmp"
     temp.write_text(json.dumps(dict(action=name, generation=generation)))
     temp.replace(command)
+accessibility = None
 try:
+    # Private session buses alone do not isolate the fixed AT-SPI runtime socket.
+    launcher = spawn(["/usr/libexec/at-spi-bus-launcher","--launch-immediately"],"atspi")
+    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION,None)
+    deadline = time.monotonic()+10
+    while True:
+        try:
+            address = session_bus.call_sync("org.a11y.Bus","/org/a11y/bus","org.a11y.Bus","GetAddress",None,None,Gio.DBusCallFlags.NO_AUTO_START,2000,None).unpack()[0]
+            break
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.1)
+    assert str(runtime) in address, "accessibility bus escaped private runtime"
+    env["AT_SPI_BUS_ADDRESS"] = address
+    accessibility = Gio.DBusConnection.new_for_address_sync(address,Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,None,None)
+    bus_pid = accessibility.call_sync("org.freedesktop.DBus","/org/freedesktop/DBus","org.freedesktop.DBus","GetConnectionUnixProcessID",GLib.Variant("(s)",("org.freedesktop.DBus",)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0]
+    manifest["session_isolation"] = {
+        "runtime_directory":str(runtime), "runtime_mode":oct(runtime.stat().st_mode & 0o777),
+        "session_bus":env.get("DBUS_SESSION_BUS_ADDRESS"), "accessibility_bus":address,
+        "accessibility_launcher_pid":launcher.pid,"accessibility_bus_pid":bus_pid,
+    }
+    (art / "manifest.json").write_text(json.dumps(manifest,indent=2))
     # Refuse an existing display; never point the proof at a user's session.
     if Path(f"/tmp/.X11-unix/X{a.display.lstrip(':')}").exists():
         raise RuntimeError("display already in use; choose a private unused display")
@@ -175,13 +202,49 @@ try:
     (art / "assertions.txt").write_text("WL-NORMAL-MAP pass 150ms scale/fade rendered\nWL-DIALOG pass 100ms map/destroy native transient\nWL-DESTROY pass retained frame after client exit; fade and cleanup\nWL-REDUCED pass scale disabled, normal fades retained\nWL-OFF pass immediate map/destroy, no retained content\n")
     print(f"window lifecycle proof passed: {art}")
 finally:
+    owned_accessibility_pids = []
+    if accessibility:
+        for name in ("org.a11y.atspi.Registry","org.freedesktop.DBus"):
+            try:
+                owned_accessibility_pids.append(accessibility.call_sync("org.freedesktop.DBus","/org/freedesktop/DBus","org.freedesktop.DBus","GetConnectionUnixProcessID",GLib.Variant("(s)",(name,)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0])
+            except Exception:
+                pass
+    owned_pidfds = []
+    for pid in owned_accessibility_pids:
+        try:
+            owned_pidfds.append(os.pidfd_open(pid))
+        except ProcessLookupError:
+            pass
     for proc in reversed(processes):
         if proc.poll() is None:
-            proc.terminate()
+            try:
+                os.killpg(proc.pid,signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                os.killpg(proc.pid,signal.SIGKILL)
                 proc.wait()
+    accessibility_stopped = True
+    for pidfd in owned_pidfds:
+        poller = select.poll()
+        poller.register(pidfd,select.POLLIN)
+        try:
+            signal.pidfd_send_signal(pidfd,signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        if not poller.poll(1000):
+            signal.pidfd_send_signal(pidfd,signal.SIGKILL)
+            accessibility_stopped = bool(poller.poll(1000)) and accessibility_stopped
+        os.close(pidfd)
+    if accessibility:
+        try:
+            accessibility.close_sync(None)
+        except GLib.Error:
+            pass
+    shutil.rmtree(runtime)
+    manifest["owned_cleanup"] = {"runtime_removed":not runtime.exists(), "accessibility_pids":owned_accessibility_pids,"accessibility_processes_stopped":accessibility_stopped}
+    (art / "manifest.json").write_text(json.dumps(manifest,indent=2))
     for log in logs:
         log.close()
