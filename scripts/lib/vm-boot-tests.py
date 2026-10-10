@@ -451,5 +451,148 @@ class PciCapabilities(unittest.TestCase):
         self.assertTrue(self.probe(8, cycle=True)["no_soft_reset"])
 
 
+def write_ppm(path, rgb, size=(64, 40)):
+    width, height = size
+    Path(path).write_bytes(f"P6 {width} {height} 255\n".encode() + bytes(rgb) * (width * height))
+
+
+class FakeScreendumpQmp:
+    """Writes a solid frame per screendump (PPM bytes; nothing decodes the
+    PNG-named ones in these tests)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def cmd(self, command, **args):
+        self.calls.append(command)
+        if command == "screendump":
+            write_ppm(args["filename"], (len(self.calls) * 7 % 256, 40, 90))
+        return {}
+
+
+class TourRecorder(unittest.TestCase):
+    def test_still_waits_for_its_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rec = lane.Recorder(FakeScreendumpQmp(), directory)
+            rec.thread.start()
+            try:
+                rec.still("probe")
+                # The still's frame exists before still() returns, so input
+                # sent next (Escape) can no longer land before the capture.
+                self.assertGreater(rec.n, rec.stills["probe"])
+                self.assertTrue((Path(rec.dir) / f"f{rec.stills['probe']:06d}.png").exists())
+            finally:
+                rec.stop.set()
+                rec.thread.join(timeout=5)
+
+    def test_burst_lends_frames_to_the_tour(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rec = lane.Recorder(FakeScreendumpQmp(), directory)
+            rec.thread.start()
+            try:
+                rec.start_burst(str(Path(directory) / "burst"))
+                import time
+                time.sleep(1.2)
+                clip = rec.end_burst()
+            finally:
+                rec.stop.set()
+                rec.thread.join(timeout=5)
+            self.assertGreater(len(clip), 2)
+            self.assertTrue(all(path.endswith(".ppm") for _, path in clip))
+            self.assertTrue(rec.lent)
+            self.assertTrue(set(rec.lent.values()) <= {path for _, path in clip})
+
+
+@unittest.skipUnless(lane.shutil.which("ffmpeg"), "needs ffmpeg")
+class HeroSet(unittest.TestCase):
+    def test_stable_names_and_constant_rate_clip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            size = (lane.WIDTH, lane.HEIGHT)
+            write_ppm(root / "still.ppm", (10, 60, 120), size)
+            lane.subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(root / "still.ppm"),
+                                 str(root / "still.png")], check=True)
+            stills = {card: str(root / "still.png") for card in lane.HERO_STILLS.values()}
+            clip = []
+            for index in range(12):
+                path = root / f"b{index:05d}.ppm"
+                write_ppm(path, (index * 20, 60, 120), size)
+                clip.append((100.0 + index * 0.25, str(path)))
+            result = lane.write_hero(str(root / "hero"), stills, clip)
+            names = sorted(p.name for p in (root / "hero").iterdir())
+            self.assertEqual(names, sorted([f"{n}.png" for n in lane.HERO_STILLS]
+                                           + ["hero-overview.gif", "hero-overview.mp4"]))
+            self.assertEqual(set(result["stills"]), set(lane.HERO_STILLS))
+            self.assertEqual(result["video"]["captured_frames"], 12)
+            self.assertEqual(result["video"]["capture_fps"], 4.0)
+            self.assertLessEqual(result["video"]["mp4_bytes"], lane.HERO_MP4_LIMIT)
+            probe = lane.subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=width,height,r_frame_rate,codec_name", "-of", "json",
+                 str(root / "hero/hero-overview.mp4")], capture_output=True, text=True, check=True)
+            stream = json.loads(probe.stdout)["streams"][0]
+            self.assertEqual((stream["codec_name"], stream["width"], stream["height"]),
+                             ("h264", lane.WIDTH, lane.HEIGHT))
+            self.assertEqual(stream["r_frame_rate"], f"{lane.HERO_FPS}/1")
+
+    def test_missing_clip_still_writes_stills(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = lane.write_hero(str(Path(directory) / "hero"), {}, [])
+            self.assertEqual(result, {"stills": {}, "video": None})
+
+
+def synthetic(fill, boxes=()):
+    """A WIDTH x HEIGHT RGB frame: fill, then (x0, y0, x1, y1, rgb) boxes."""
+    w, h = lane.WIDTH, lane.HEIGHT
+    px = bytearray(bytes(fill) * (w * h))
+    for x0, y0, x1, y1, rgb in boxes:
+        row = bytes(rgb) * (x1 - x0)
+        for y in range(y0, y1):
+            px[(y * w + x0) * 3:(y * w + x1) * 3] = row
+    return w, h, bytes(px)
+
+
+class HeroViewPredicates(unittest.TestCase):
+    GREY, NAVY, WHITE = (36, 36, 38), (8, 24, 52), (250, 250, 250)
+
+    def views(self, frame):
+        return [name for name in ("overview_shown", "app_grid_shown", "desktop_shown", "switcher_shown")
+                if getattr(lane, name)(*frame)]
+
+    def test_overview_with_window_previews(self):
+        frame = synthetic(self.GREY, [(300, 200, 980, 600, self.WHITE)])
+        self.assertEqual(self.views(frame), ["overview_shown"])
+
+    def test_app_grid_icons_on_the_backdrop(self):
+        icons = [(x, y, x + 24, y + 24, (200, 60, 40)) for x in range(340, 940, 60) for y in range(250, 550, 60)]
+        self.assertEqual(self.views(synthetic(self.GREY, icons)), ["app_grid_shown"])
+
+    def test_empty_grid_while_loading_is_neither(self):
+        self.assertEqual(self.views(synthetic(self.GREY)), [])
+
+    def test_desktop_wallpaper_is_not_grey(self):
+        self.assertEqual(self.views(synthetic(self.NAVY)), ["desktop_shown"])
+
+    def test_switcher_island_over_windows(self):
+        frame = synthetic(self.NAVY, [(100, 60, 1100, 760, self.WHITE), (520, 340, 760, 460, self.GREY)])
+        self.assertEqual(self.views(frame), ["desktop_shown", "switcher_shown"])
+
+    def test_await_still_keeps_the_frame_on_screen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            frames = []
+            for index, fill in enumerate((self.NAVY, self.GREY)):
+                path = Path(directory) / f"b{index}.ppm"
+                w, h, px = synthetic(fill, [(300, 200, 980, 600, self.WHITE)] if index else [])
+                path.write_bytes(f"P6 {w} {h} 255\n".encode() + px)
+                frames.append((float(index), str(path)))
+            rec = SimpleNamespace(burst_frames=frames, stills={})
+            self.assertTrue(lane.Recorder.await_still(rec, "hero-overview", lane.overview_shown,
+                                                      timeout=2, settle=0))
+            self.assertEqual(rec.stills["hero-overview"], frames[1][1])
+            self.assertFalse(lane.Recorder.await_still(rec, "hero-app-grid", lane.app_grid_shown,
+                                                       timeout=0.3, settle=0))
+            self.assertEqual(rec.stills["hero-app-grid"], frames[1][1])
+
+
 if __name__ == "__main__":
     unittest.main()

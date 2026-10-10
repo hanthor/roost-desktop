@@ -1,0 +1,42 @@
+#!/bin/sh
+# tuna-hero-media — install the README hero set from a CI run.
+#
+# Usage:
+#   scripts/tuna-hero-media <run-id> [--repo OWNER/REPO]
+#
+# The marlin-vm job boots the real Marlin image and its tour writes
+# tour/hero/ (hero-overview, hero-app-grid, hero-quick-settings,
+# hero-notifications, hero-switcher and hero-lock PNGs at 1280x800, and
+# hero-overview.mp4/.gif) into the tuna-tour artifact. This downloads
+# that artifact for <run-id> and copies the set into docs/walkthrough/,
+# failing if any file is missing so the set is never partial. A fresh
+# run: gh workflow run ci.yml --ref main. Then update the provenance in
+# docs/walkthrough/README-media.md.
+set -eu
+
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+REPO=tuna-os/tuna-desktop
+RUN=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo) REPO="$2"; shift 2 ;;
+        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        *) RUN="$1"; shift ;;
+    esac
+done
+[ -n "$RUN" ] || { sed -n '2,15p' "$0" >&2; exit 2; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+gh run download "$RUN" --repo "$REPO" --name tuna-tour --dir "$WORK"
+for name in hero-overview.png hero-app-grid.png hero-quick-settings.png \
+        hero-notifications.png hero-switcher.png hero-lock.png \
+        hero-overview.mp4 hero-overview.gif; do
+    if [ ! -s "$WORK/hero/$name" ]; then
+        echo "tuna-hero-media: run $RUN has no hero/$name" >&2
+        exit 1
+    fi
+done
+cp "$WORK"/hero/hero-* "$ROOT/docs/walkthrough/"
+ls -l "$ROOT"/docs/walkthrough/hero-*

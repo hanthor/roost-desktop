@@ -912,13 +912,16 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
 
 class Recorder:
     """Screendump the VM TOUR_FPS times a second into numbered PNGs while
-    the tour drives input; marks splice a title card in at a frame index."""
+    the tour drives input; marks splice a title card in at a frame index.
+    A burst captures uncompressed frames as fast as QMP allows for the hero
+    clip, lending one to the tour every 1/TOUR_FPS so the tour has no gap."""
 
     def __init__(self, qmp, out):
         self.qmp, self.dir = qmp, os.path.join(out, "frames")
         os.makedirs(self.dir, exist_ok=True)
         self.lock, self.stop, self.n, self.marks = threading.Lock(), threading.Event(), 0, []
         self.stills = {}
+        self.burst_dir, self.burst_frames, self.lent, self.last_main = None, [], {}, 0.0
         cmd = qmp.cmd
 
         def locked(command, **args):
@@ -930,9 +933,23 @@ class Recorder:
     def _run(self):
         while not self.stop.is_set():
             t = time.time()
+            burst = self.burst_dir
             try:
+                if burst is not None:
+                    path = os.path.join(burst, f"b{len(self.burst_frames):05d}.ppm")
+                    self.qmp.cmd("screendump", filename=path, format="ppm")
+                    self.burst_frames.append((time.monotonic(), path))
+                    if t - self.last_main >= 1 / TOUR_FPS:
+                        self.lent[self.n], self.last_main = path, t
+                        self.n += 1
+                    # Capturing faster than the clip's output rate holds
+                    # QEMU's main loop so often that the guest display
+                    # falls seconds behind input (62 fps did); pace it.
+                    self.stop.wait(max(0.0, 1 / HERO_FPS - (time.time() - t)))
+                    continue
                 self.qmp.cmd("screendump", filename=os.path.join(self.dir, f"f{self.n:06d}.png"),
                              format="png")
+                self.last_main = t
                 self.n += 1
             except (OSError, RuntimeError, ValueError) as e:
                 log(f"tour: screendump failed: {e}")
@@ -943,14 +960,158 @@ class Recorder:
         self.marks.append((self.n, card))
 
     def still(self, card, delay=0.0):
-        """Keep the next captured frame as this section's still."""
+        """Keep the next captured frame as this section's still, and wait
+        until it exists so the caller's next input cannot race it."""
         time.sleep(delay)
-        self.stills[card] = self.n + 1
+        target = self.n + 1
+        self.stills[card] = target
+        deadline = time.monotonic() + 5
+        while self.n <= target and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def await_still(self, card, predicate, timeout=25.0, settle=1.0):
+        """During a burst, keep the first frame for which predicate(w, h, px)
+        holds and still holds settle seconds later. The VM's display can
+        trail input by several seconds under llvmpipe, so fixed waits miss;
+        this waits for what is actually on screen. Returns whether it did."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.burst_frames and predicate(*read_ppm(self.burst_frames[-1][1])):
+                time.sleep(settle)
+                path = self.burst_frames[-1][1]
+                if predicate(*read_ppm(path)):
+                    self.stills[card] = path
+                    return True
+            time.sleep(0.2)
+        log(f"tour: {card} never appeared on screen; keeping the latest frame")
+        if self.burst_frames:
+            self.stills[card] = self.burst_frames[-1][1]
+        return False
+
+    def start_burst(self, path):
+        os.makedirs(path, exist_ok=True)
+        self.burst_frames = []
+        self.burst_dir = path
+
+    def end_burst(self):
+        self.burst_dir = None
+        return list(self.burst_frames)
 
 
-def run_tour(qmp, out, serial_path):
+def grey_share(w, px, rect):
+    """Share of sampled pixels in rect that are the overview's dark neutral
+    grey (the wallpaper's dark areas are saturated navy, not grey)."""
+    x0, y0, x1, y1 = rect
+    total = grey = 0
+    for y in range(y0, y1, 6):
+        for x in range(x0, x1, 6):
+            i = (y * w + x) * 3
+            r, g, b = px[i], px[i + 1], px[i + 2]
+            total += 1
+            grey += max(r, g, b) - min(r, g, b) < 14 and 45 < r + g + b < 225
+    return grey / total if total else 0.0
+
+
+# Calibrated on Marlin VM frames: the overview's backdrop fills the bottom
+# left corner; window previews keep the centre light, the app grid's icons
+# leave it mostly grey (an empty, still-loading grid is all grey); the
+# Alt+Tab popup is a dark island over light windows.
+CORNER, CENTRE, POPUP = (0, 640, 300, 780), (340, 250, 940, 550), (440, 330, 840, 470)
+
+
+def overview_shown(w, h, px):
+    return grey_share(w, px, CORNER) > 0.85 and grey_share(w, px, CENTRE) < 0.6
+
+
+def app_grid_shown(w, h, px):
+    return grey_share(w, px, CORNER) > 0.85 and 0.6 <= grey_share(w, px, CENTRE) < 0.95
+
+
+def desktop_shown(w, h, px):
+    return grey_share(w, px, CORNER) < 0.2
+
+
+def switcher_shown(w, h, px):
+    return desktop_shown(w, h, px) and 0.12 <= grey_share(w, px, POPUP) <= 0.6
+
+
+# README hero set: published name -> tour still it comes from.
+HERO_STILLS = {
+    "hero-overview": "hero-overview",
+    "hero-app-grid": "hero-app-grid",
+    "hero-quick-settings": "quick-settings",
+    "hero-notifications": "calendar",
+    "hero-switcher": "alt-tab",
+    "hero-lock": "lock",
+}
+HERO_FPS = 15           # constant output rate of the hero MP4
+HERO_MP4_LIMIT = 2_000_000
+
+
+def optimize_png(src, dst):
+    """Copy src to dst, quantized with pngquant and recompressed with
+    optipng when they are installed (the lane installs both)."""
+    if shutil.which("pngquant"):
+        done = subprocess.run(["pngquant", "--quality=80-98", "--speed", "1", "--strip",
+                               "--force", "--output", dst, src], check=False)
+        if done.returncode != 0:
+            shutil.copyfile(src, dst)
+    else:
+        shutil.copyfile(src, dst)
+    if shutil.which("optipng"):
+        subprocess.run(["optipng", "-quiet", "-o2", dst], check=False)
+
+
+def write_hero(hero, stills, clip):
+    """Write the README hero set (stable names, 1280x800) into hero/: one
+    optimized PNG per HERO_STILLS entry, and the burst clip as an H.264 MP4
+    resampled to HERO_FPS from its real capture times, plus a GIF."""
+    os.makedirs(hero, exist_ok=True)
+    result = {"stills": {}, "video": None}
+    for name, card in HERO_STILLS.items():
+        if card in stills:
+            dst = os.path.join(hero, f"{name}.png")
+            optimize_png(stills[card], dst)
+            result["stills"][name] = os.path.getsize(dst)
+        else:
+            log(f"tour: hero still {name} missing")
+    frames = [(t, path) for t, path in clip if os.path.exists(path) and os.path.getsize(path) > 0]
+    if len(frames) < 2:
+        log("tour: hero clip has no frames")
+        return result
+    listing = os.path.join(hero, ".clip.txt")
+    with open(listing, "w") as stream:
+        for (t, path), (later, _) in zip(frames, frames[1:] + [(frames[-1][0] + 1 / HERO_FPS, None)]):
+            stream.write(f"file '{path}'\nduration {max(later - t, 0.001):.4f}\n")
+        stream.write(f"file '{frames[-1][1]}'\n")
+    mp4 = os.path.join(hero, "hero-overview.mp4")
+    for crf in (24, 28, 32):
+        subprocess.run(["ffmpeg", "-loglevel", "warning", "-y", "-f", "concat", "-safe", "0",
+                        "-i", listing, "-vf", f"fps={HERO_FPS},format=yuv420p",
+                        "-c:v", "libx264", "-preset", "slow", "-crf", str(crf),
+                        "-movflags", "+faststart", "-an", mp4], check=True)
+        if os.path.getsize(mp4) <= HERO_MP4_LIMIT:
+            break
+    gif = os.path.join(hero, "hero-overview.gif")
+    subprocess.run(["ffmpeg", "-loglevel", "warning", "-y", "-i", mp4, "-vf",
+                    "fps=8,scale=640:-2:flags=lanczos,split[a][b];"
+                    "[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4",
+                    "-loop", "0", gif], check=False)
+    os.remove(listing)
+    span = frames[-1][0] - frames[0][0]
+    result["video"] = {"mp4_bytes": os.path.getsize(mp4),
+                       "gif_bytes": os.path.getsize(gif) if os.path.exists(gif) else None,
+                       "captured_frames": len(frames), "seconds": round(span, 2),
+                       "capture_fps": round((len(frames) - 1) / span, 2) if span else None,
+                       "output_fps": HERO_FPS}
+    log(f"tour: hero set {sorted(result['stills'])}, clip {result['video']}")
+    return result
+
+
+def run_tour(qmp, out, serial_path, agent=None):
     """Scripted feature tour through QMP input, recorded to a WebM with a
-    title card per section. Returns a manifest entry."""
+    title card per section, plus the README hero set (see write_hero).
+    Returns a manifest entry."""
     tour = os.path.join(out, "tour")
     scratch = os.path.join(tour, ".work")
     os.makedirs(scratch, exist_ok=True)
@@ -965,6 +1126,7 @@ def run_tour(qmp, out, serial_path):
         keys("ret")
         wait(7)
 
+    clip = []
     rec.thread.start()
     try:
         rec.mark("intro")
@@ -990,6 +1152,13 @@ def run_tour(qmp, out, serial_path):
         wait(1)
         keys("esc")
         wait(2)
+        # Sample notifications for the message list in the calendar shot,
+        # sent early so their banners have gone before quick settings opens.
+        if agent is not None:
+            try:
+                agent.run("hero-notify")
+            except (OSError, RuntimeError, ValueError) as e:
+                log(f"tour: hero notifications failed: {e}")
         # Actual PipeWire sink on the virtual HDA device. Guest health
         # samples each completed mutation; allow a sample between keys.
         for media_key in ("volumeup", "volumedown", "audiomute", "audiomute"):
@@ -1012,11 +1181,35 @@ def run_tour(qmp, out, serial_path):
         rec.mark("alt-tab")
         for query in ("disks", "system monitor", "files"):
             launch(query)
-        keys("alt", "tab", hold_ms=1500)
-        rec.still("alt-tab", delay=1.0)
-        wait(3)
-        keys("alt", "tab", hold_ms=1500)
-        wait(3)
+        # The burst also yields the hero clip: Alt+Tab, the overview with
+        # the three real apps, back to the desktop, then the app grid.
+        # Each shot waits for its view to be on screen, since the VM's
+        # display trails input by seconds while System Monitor draws.
+        rec.start_burst(os.path.join(scratch, "hero"))
+        rec.await_still("desktop", desktop_shown, timeout=10, settle=0.5)
+        # Hold Alt long enough for a late popup; it closes on release.
+        pressed = time.monotonic()
+        keys("alt", "tab", hold_ms=12000)
+        rec.await_still("alt-tab", switcher_shown, timeout=11)
+        # Alt stays down until QEMU releases it; then the popup must go.
+        wait(max(0.0, 12.5 - (time.monotonic() - pressed)))
+        rec.await_still("desktop", lambda *f: desktop_shown(*f) and not switcher_shown(*f),
+                        timeout=20, settle=1.0)
+        keys("meta_l")
+        rec.await_still("hero-overview", overview_shown, settle=1.5)
+        wait(1)
+        keys("esc")
+        rec.await_still("desktop", desktop_shown, timeout=20)
+        keys("meta_l", "a")
+        rec.await_still("hero-app-grid", app_grid_shown, settle=1.5)
+        wait(1)
+        keys("esc")
+        wait(1)
+        keys("esc")
+        rec.await_still("desktop", desktop_shown, timeout=20)
+        wait(1)
+        clip = rec.end_burst()
+        rec.stills.pop("desktop", None)
         rec.mark("scroll")
         keys("meta_l", "shift", "t")
         wait(3)
@@ -1081,6 +1274,16 @@ def run_tour(qmp, out, serial_path):
             shutil.copyfile(src, dst)
         count += 1
 
+    def frame_png(i, dst=None):
+        """The PNG for captured frame i, converting a frame lent by a burst."""
+        if i in rec.lent:
+            dst = dst or os.path.join(scratch, f"lent{i:06d}.png")
+            if not os.path.exists(dst):
+                subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", rec.lent[i],
+                                "-pix_fmt", "rgb24", dst], check=True)
+            return dst
+        return os.path.join(rec.dir, f"f{i:06d}.png")
+
     for i in range(rec.n + 1):
         for card in at.get(i, []):
             if card not in cards:
@@ -1092,7 +1295,7 @@ def run_tour(qmp, out, serial_path):
                 cards[card] = dst
             for _ in range(CARD_HOLD):
                 put(cards[card])
-        frame = os.path.join(rec.dir, f"f{i:06d}.png")
+        frame = frame_png(i) if i < rec.n else os.path.join(rec.dir, f"f{i:06d}.png")
         if os.path.exists(frame) and os.path.getsize(frame) > 0:
             put(frame)
     pattern = os.path.join(seq, "f%06d.png")
@@ -1104,16 +1307,29 @@ def run_tour(qmp, out, serial_path):
                     "-i", pattern, "-vf", "scale=640:-2:flags=lanczos", "-loop", "0",
                     "-c:v", "libwebp", "-quality", "60", "-compression_level", "6",
                     os.path.join(tour, "preview.webp")], check=False)
+    stills = {}
     for card, idx in rec.stills.items():
-        frame = os.path.join(rec.dir, f"f{min(idx, rec.n - 1):06d}.png")
+        if isinstance(idx, str):  # a burst frame kept by await_still
+            frame = os.path.join(scratch, f"still-{card}.png")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", idx,
+                            "-pix_fmt", "rgb24", frame], check=True)
+        else:
+            frame = frame_png(min(idx, rec.n - 1))
         if os.path.exists(frame):
-            shutil.copyfile(frame, os.path.join(tour, f"T-{card}.png"))
+            stills[card] = frame
+            if not card.startswith("hero-"):
+                shutil.copyfile(frame, os.path.join(tour, f"T-{card}.png"))
+    try:
+        hero = write_hero(os.path.join(tour, "hero"), stills, clip)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"tour: hero set failed: {e}")
+        hero = None
     shutil.rmtree(scratch, ignore_errors=True)
     ok = os.path.exists(webm) and os.path.getsize(webm) > 0
     log(f"tour: {rec.n} frames, {len(rec.marks)} sections -> {webm if ok else 'NO VIDEO'}")
     return {"video": "tour/tuna-tour.webm" if ok else None, "frames": rec.n,
             "sections": [c for _, c in rec.marks], "capture_fps": TOUR_FPS,
-            "playback_fps": PLAY_FPS}
+            "playback_fps": PLAY_FPS, "hero": hero}
 
 
 def select_corner_mouse(qmp, relative):
@@ -1380,9 +1596,9 @@ def main():
                     agent.close()
             if a.tour:
                 try:
-                    tour_info = run_tour(qmp, out, serial_path)
-                    tour_serial_end = len(read_text(serial_path))
                     agent = guest_agent.GuestAgent(agent_path)
+                    tour_info = run_tour(qmp, out, serial_path, agent)
+                    tour_serial_end = len(read_text(serial_path))
                     try:
                         run_lifecycle(qmp, agent, out, serial_path, record)
                     finally:

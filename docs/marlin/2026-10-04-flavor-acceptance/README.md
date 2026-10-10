@@ -14,6 +14,8 @@ The shipped Cage/gtkgreet picker offered `roost-session`. Real fixture credentia
 
 ![Shipped Marlin greeter offering Roost](greeter.png)
 
+The greeter's dark clock and "Username:" label on the dark wallpaper, and the raw `roost-session` entry, come from the image's unstyled Cage/gtkgreet launcher, not from Tuna Desktop; tracked in [tunaOS #3110](https://github.com/tuna-os/tunaOS/issues/3110).
+
 ![Roost overview after real PAM login](session.png)
 
 The signed served package was published and clean-installed in [package run 37185125494](https://github.com/tuna-os/tunaos-packages/actions/runs/37185125494), from [package PR #791](https://github.com/tuna-os/tunaos-packages/pull/791), pinned to Roost `c28f96ebaa1fdf016308904bb4af4ec7922aacac`. The screenshots and logs qualify that declared payload. Later upstream fixes need a package/image refresh before endurance qualification.

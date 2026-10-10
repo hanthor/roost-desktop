@@ -28,17 +28,25 @@ today, in frames the GTK shell proof takes on each change.
 
 ## Screenshots and overview demo
 
-![Tuna Desktop overview with three live window previews](docs/walkthrough/overview-demo.png)
+![Tuna Desktop overview with Files, Disks and System Monitor open on the Marlin wallpaper](docs/walkthrough/hero-overview.png)
 
-| Quick settings | App grid |
+| App grid | Quick settings |
 | --- | --- |
-| ![Tuna Desktop quick settings with volume, brightness and service controls](docs/walkthrough/quick-settings-demo.png) | ![Tuna Desktop app grid](docs/walkthrough/app-grid-demo.png) |
+| ![Tuna Desktop app grid with the installed GNOME apps](docs/walkthrough/hero-app-grid.png) | ![Tuna Desktop quick settings with volume, network, Night Light, Dark Style and Do Not Disturb](docs/walkthrough/hero-quick-settings.png) |
 
-![Overview demo: open the overview, select a window, and return to the desktop](docs/walkthrough/overview-demo.gif)
+| Notifications and calendar | Alt+Tab |
+| --- | --- |
+| ![Tuna Desktop message list with grouped notifications beside the calendar](docs/walkthrough/hero-notifications.png) | ![Tuna Desktop Alt+Tab switcher with live window thumbnails](docs/walkthrough/hero-switcher.png) |
 
-[Play or download the overview video (MP4, 12 seconds)](docs/walkthrough/overview-demo.mp4).
-The demo shows an actual nested Tuna Desktop session with three libadwaita test windows.
-See [capture details](docs/walkthrough/README-media.md) for source revisions and reproduction.
+![Tuna Desktop lock screen clock over the blurred wallpaper](docs/walkthrough/hero-lock.png)
+
+![Overview demo: open the overview with three apps, return to the desktop, then open the app grid](docs/walkthrough/hero-overview.gif)
+
+[Play or download the overview video (MP4)](docs/walkthrough/hero-overview.mp4).
+These are frames from the real Marlin image booted in a QEMU VM by CI, on
+its hardware (DRM/KMS) session, with the GNOME apps the image ships and its
+default wallpaper. See [capture details](docs/walkthrough/README-media.md)
+for the run, source revision and how to reproduce.
 
 ## Project status
 

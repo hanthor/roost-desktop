@@ -494,7 +494,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
           sudo mkdir -p /mnt/vm && sudo chown "$(id -u):$(id -g)" /mnt/vm
           df -h / /mnt
-      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf ffmpeg
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf ffmpeg pngquant optipng
       - name: Build the Marlin Tuna Desktop image and the VM test layer
         run: |
           cp arch-artifacts/tuna-desktop-[0-9]*.pkg.tar.zst ./tuna.pkg.tar.zst
@@ -536,7 +536,8 @@ jobs:
           sudo podman rmi -a -f >/dev/null 2>&1 || true
           df -h / /mnt
       # After the assertions, --tour drives a scripted feature tour
-      # through QMP input and records it to tour/tuna-tour.webm.
+      # through QMP input and records it to tour/tuna-tour.webm, plus the
+      # README hero set in tour/hero/ (scripts/tuna-hero-media installs it).
       - name: Boot the disk, assert the Tuna Desktop hardware session, record the tour
         run: >-
           scripts/tuna-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --boots 5 --tour
@@ -621,7 +622,7 @@ jobs:
         with:
           name: scroll-proof-shots
           path: /tmp/tuna-docs/scroll
-      - run: shellcheck scripts/tuna-docs-shots
+      - run: shellcheck scripts/tuna-docs-shots scripts/tuna-hero-media
       - run: scripts/tuna-docs-shots collect /tmp/tuna-docs/journey /tmp/tuna-docs/app /tmp/tuna-docs/scroll --dest /tmp/tuna-docs/shots && ls /tmp/tuna-docs/shots | wc -l | grep -q 7
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

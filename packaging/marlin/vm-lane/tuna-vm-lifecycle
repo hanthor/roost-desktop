@@ -18,6 +18,11 @@ import shlex
 OWNER = pwd.getpwnam("tuna-test")
 RUNTIME = f"/run/user/{OWNER.pw_uid}"
 STATE = pathlib.Path(RUNTIME, "tuna-vm-state.json")
+HERO_NOTIFICATIONS = (
+    ("Files", "org.gnome.Nautilus", "Copy finished", "Holiday photos copied to Pictures"),
+    ("Files", "org.gnome.Nautilus", "Trash emptied", "12 items were permanently deleted"),
+    ("Disks", "org.gnome.DiskUtility", "Disk check complete", "No problems were found on the system disk"),
+)
 
 
 def call(*args, user=False, check=True):
@@ -628,6 +633,18 @@ def main():
                   "greeter_pids": call("pgrep", "-x", "gtkgreet", check=False).splitlines(),
                   "compositor_pids": call("pgrep", "-u", str(OWNER.pw_uid), "-x",
                                           "tuna-composito", check=False).splitlines()}
+    elif action == "hero-notify":
+        # Scripted sample notifications for the README hero shot of the
+        # message list; sent through the real org.freedesktop.Notifications
+        # server the shell owns. The text is fixed demo copy, not activity.
+        ids = []
+        for app, icon, summary, body in HERO_NOTIFICATIONS:
+            reply = call("busctl", "--user", "call", "org.freedesktop.Notifications",
+                         "/org/freedesktop/Notifications", "org.freedesktop.Notifications",
+                         "Notify", "susssasa{sv}i", app, "0", icon, summary, body,
+                         "0", "0", "0", user=True)
+            ids.append(reply)
+        result = {"sent": len(ids), "replies": ids}
     else:
         raise ValueError("unknown lifecycle action")
     print(json.dumps(result))
