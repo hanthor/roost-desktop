@@ -3640,6 +3640,12 @@ slide_last() { jq -c '.workspace_slide.history[-1]' "$CSTATE"; }
 slide_settled() {
     cstate ".active_workspace == $1 and .workspace_slide.in_flight == null and (.workspace_slide.history | length) > 0 and .workspace_slide.history[-1].to == $1" "$2"
 }
+# A key switches the model on input, but the slide starts at the frame
+# that observes it: wait for that frame before moving the frozen clock,
+# or the slide starts at the later time and never reaches its end.
+slide_began() {
+    cstate ".active_workspace == $1 and .workspace_slide.in_flight.record.to == $1" "$2"
+}
 slide_home="$(jq -r '.active_workspace' "$CSTATE")"
 anim_clock 10000
 cstate '.animation_clock_manual and .motion_policy == "full"' "slide clock frozen" ||
@@ -3663,13 +3669,14 @@ jq -e --argjson home "$slide_home" \
     "$ARTIFACTS/workspace-slide-key.json" >/dev/null ||
     fail G-WORKSPACE-SLIDE "the key switch did not slide 250 ms: $(cat "$ARTIFACTS/workspace-slide-key.json")"
 xdotool key super+Page_Up
+slide_began "$slide_home" "sliding back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not start a slide back"
 anim_clock 10600
 slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
 # Twice in quick succession: the second press carries on from the drawn
 # offset and ends two workspaces over, never moving backwards.
 anim_clock 11000
 xdotool key super+Page_Down
-cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight != null" "first press" ||
+slide_began $((slide_home + 1)) "first press" ||
     fail G-WORKSPACE-SLIDE "the first press did not start a slide"
 anim_clock 11060
 cstate '.workspace_slide.in_flight.position > .workspace_slide.in_flight.from_slot' "first press moving" ||
@@ -3693,7 +3700,8 @@ while [ "$(jq -r '.active_workspace' "$CSTATE")" != "$slide_home" ]; do
     [ "$slide_clock" -lt 13000 ] || fail G-WORKSPACE-SLIDE "could not return home"
     slide_from="$(jq -r '.active_workspace' "$CSTATE")"
     xdotool key super+Page_Up
-    cstate ".active_workspace != $slide_from" "stepping home" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not switch back"
+    cstate ".active_workspace != $slide_from and .workspace_slide.in_flight.record.to == .active_workspace" "stepping home" ||
+        fail G-WORKSPACE-SLIDE "Super+Page_Up did not start a slide back"
     slide_clock=$((slide_clock + 400))
     anim_clock "$slide_clock"
     cstate '.workspace_slide.in_flight == null' "stepped home" || fail G-WORKSPACE-SLIDE "the slide back did not settle"
@@ -3704,6 +3712,7 @@ cstate '.motion_policy == "fade-only"' "fade-only slide" ||
     fail G-WORKSPACE-SLIDE "reduced motion did not reach the compositor"
 anim_clock 14000
 xdotool key super+Page_Down
+slide_began $((slide_home + 1)) "crossfade started" || fail G-WORKSPACE-SLIDE "fade-only motion did not start a switch"
 anim_clock 14125
 cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight.record.motion == \"fade\"" "crossfading" ||
     fail G-WORKSPACE-SLIDE "fade-only motion did not crossfade"
@@ -3716,6 +3725,7 @@ if ! slide_settled $((slide_home + 1)) "crossfade settled"; then
     slide_settled $((slide_home + 1)) "crossfade settled" || fail G-WORKSPACE-SLIDE "the crossfade did not settle in 250 ms"
 fi
 xdotool key super+Page_Up
+slide_began "$slide_home" "crossfading back" || fail G-WORKSPACE-SLIDE "fade-only motion did not start the switch back"
 anim_clock 14600
 if ! slide_settled "$slide_home" "crossfade back"; then
     # Same late-start hazard as above: the fade back can start at the final
@@ -3771,18 +3781,26 @@ pass G-SWIPE-DIRECTIONS "nested three-finger left/right switch and restore the e
 # The strip follows the fingers while they are down (1 workspace per
 # 400px), and a slow release short of half way goes back.
 slide_settled "$gesture_home" "swipe start" || fail G-SWIPE-FOLLOW "the restore swipe did not settle"
+swipe_at() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dx":%s,"dy":0,"time":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
 held_at() {
     cstate "(.workspace_slide.in_flight | .following and ((.position - (.strip | index($gesture_home)) - $1) | . < 0.001 and . > -0.001)) and .active_workspace == $gesture_home" "$2"
 }
-swipe_phase begin 0 0
-swipe_phase update -100 0
+# Event times are explicit so the release velocity never depends on how
+# quickly the runner delivers the phases.
+swipe_at begin 0 30000
+swipe_at update -100 30010
 held_at 0.25 "a quarter over" || fail G-SWIPE-FOLLOW "100px of travel did not hold the strip a quarter over"
 cp "$CSTATE" "$ARTIFACTS/swipe-follow-quarter.json"
-swipe_phase update -60 0
+swipe_at update -60 30020
 held_at 0.4 "0.4 over" || fail G-SWIPE-FOLLOW "the strip did not keep following the fingers"
-swipe_phase update 0 0
-sleep 0.3
-swipe_phase end 0 0
+# Lifted 400 ms after the last movement: no velocity, so it snaps back.
+swipe_at end 0 30420
 slide_settled "$gesture_home" "cancelled swipe" || fail G-SWIPE-FOLLOW "a slow release under half way did not go back"
 jq -e '.workspace_slide.history[-1] | .gesture and .motion == "slide"' "$CSTATE" >/dev/null ||
     fail G-SWIPE-FOLLOW "the cancelled swipe was not animated back"
@@ -3791,13 +3809,6 @@ pass G-SWIPE-FOLLOW "a held three-finger swipe drags the workspace strip and a s
 # Release velocity decides the landing and the duration (swipeTracker.js):
 # a fast short flick still switches, sooner than a slow drag finishes.
 # Phases carry event times so the velocity is deterministic.
-swipe_at() {
-    swipe_sequence=$((swipe_sequence + 1))
-    printf '{"phase":"%s","dx":%s,"dy":0,"time":%s,"sequence":%s}\n' \
-        "$1" "$2" "$3" "$swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
-    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
-    sleep 0.2
-}
 swipe_at begin 0 10000
 swipe_at update -40 10008
 swipe_at update -40 10016
