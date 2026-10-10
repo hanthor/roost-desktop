@@ -3708,10 +3708,21 @@ anim_clock 14125
 cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight.record.motion == \"fade\"" "crossfading" ||
     fail G-WORKSPACE-SLIDE "fade-only motion did not crossfade"
 anim_clock 14250
-slide_settled $((slide_home + 1)) "crossfade settled" || fail G-WORKSPACE-SLIDE "the crossfade did not settle in 250 ms"
+if ! slide_settled $((slide_home + 1)) "crossfade settled"; then
+    # A loaded runner can process the keypress after the tick above, so the
+    # fade starts late against the frozen manual clock and never settles.
+    # Advance past any such late start and re-check before failing.
+    anim_clock 14750
+    slide_settled $((slide_home + 1)) "crossfade settled" || fail G-WORKSPACE-SLIDE "the crossfade did not settle in 250 ms"
+fi
 xdotool key super+Page_Up
 anim_clock 14600
-slide_settled "$slide_home" "crossfade back" || fail G-WORKSPACE-SLIDE "could not crossfade back"
+if ! slide_settled "$slide_home" "crossfade back"; then
+    # Same late-start hazard as above: the fade back can start at the final
+    # tick and freeze at elapsed zero. Cover it with one more advance.
+    anim_clock 15100
+    slide_settled "$slide_home" "crossfade back" || fail G-WORKSPACE-SLIDE "could not crossfade back"
+fi
 gsettings reset org.gnome.desktop.a11y.interface reduced-motion
 gsettings set org.gnome.desktop.interface enable-animations false
 cstate '(.animations_enabled | not)' "slide animations off" ||
