@@ -34,6 +34,9 @@ def parse_ledger(path):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if cells and cells[0] == "ID":
                 header = cells
+                if header != HEADER:
+                    errors.append(f"ledger header must be {HEADER}, got {header}")
+                    return [], errors
                 continue
             if set("".join(cells)) <= set("-: "):
                 continue
@@ -45,6 +48,7 @@ def parse_ledger(path):
             rows.append(dict(zip(header, cells), _line=n))
     if header != HEADER:
         errors.append(f"ledger header must be {HEADER}, got {header}")
+        return [], errors
     if not rows:
         errors.append("ledger has no capability rows")
     for row in rows:

@@ -10,10 +10,10 @@ SCRIPT = Path(__file__).resolve().parents[1] / "tuna-ledger"
 HEADER = "| ID | GNOME 51 behavior | Tuna Desktop status | Tests | Evidence / notes | Deviation and owner |\n|---|---|---|---|---|---|\n"
 
 class LedgerQualification(unittest.TestCase):
-    def check(self, rows, *, complete=False, assertions="G-TEST pass test\n"):
+    def check(self, rows, *, complete=False, assertions="G-TEST pass test\n", header=HEADER):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "ledger").write_text(HEADER + rows)
+            (root / "ledger").write_text(header + rows)
             (root / "tests").write_text("module::exists: test\n")
             (root / "assertions").write_text(assertions)
             argv = [sys.executable, str(SCRIPT), "check", "--ledger", str(root / "ledger"),
@@ -24,6 +24,14 @@ class LedgerQualification(unittest.TestCase):
 
     def row(self, status="pass", refs="proof:G-TEST", ident="P-TEST", behavior="A real behavior"):
         return f"| {ident} | {behavior} | {status} | {refs} | evidence | — |\n"
+
+    def test_renamed_or_missing_header_reports_schema_error_without_traceback(self):
+        for header in (HEADER.replace("GNOME 51 behavior", "Behavior"), ""):
+            for complete in (False, True):
+                result = self.check(self.row(), complete=complete, header=header)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("ledger header must be", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
 
     def test_empty_ledger_is_never_success(self):
         for complete in (False, True):
