@@ -107,3 +107,14 @@ every cited test must exist and pass. CI fails otherwise.
 Add a row when a GNOME 51 behavior enters scope. Move a row to `pass` only
 with a cited test or a recorded review entry (`docs/reviews/`). A row whose
 cited test disappears or fails breaks CI.
+
+## v1 qualification check
+
+Use `scripts/tuna-ledger check --require-complete` with the same `--tests` and
+`--assertions` inputs as the CI ledger check. This stricter mode rejects every
+partial, missing, deviation, untested and `pass (nested)` row; a nested-only
+proof does not establish the shipped Marlin desktop. It also rejects empty
+ledgers and invalid statuses. The normal check still permits incremental work.
+
+Passing this check establishes only the ledger contract. Published image,
+daily-driver, gap audit and paired performance evidence remain separate v1 gates.

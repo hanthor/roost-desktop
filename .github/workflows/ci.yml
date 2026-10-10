@@ -37,6 +37,7 @@ jobs:
       - run: scripts/rename-to-tuna --check --no-cargo
       - run: python3 scripts/lib/tuna-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
+      - run: python3 scripts/lib/ledger-tests.py
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
       - run: python3 scripts/lib/tuna-perf-payload-tests.py
