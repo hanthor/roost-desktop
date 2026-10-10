@@ -3474,6 +3474,18 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     if grep -q 'No IM module matching GTK_IM_MODULE=xim' "$ARTIFACTS/xim-window.log"; then
         fail G-IME-XIM "the client has no XIM module"
     fi
+    # Focus can drift between the check above and typing, leaving the
+    # keystrokes with no surface (#566 family). Click the field the way a
+    # user would, then re-verify focus immediately before typing.
+    xim_rect="$(jq -r '.windows[] | select(.app_id == "tuna-xim") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $xim_rect
+    { [ "$1" = null ] || [ -z "$1" ]; } && fail G-IME-XIM "the X11 field vanished before typing"
+    xrx=$1 xry=$2 xrw=$3 xrh=$4
+    xdotool mousemove --window "$WID" $((xrx + xrw / 2)) $((xry + xrh / 2)) click 1
+    sleep 0.5
+    cstate '.focused_app_id == "tuna-xim"' "XIM focus before typing" ||
+        fail G-IME-XIM "the X11 field lost focus before typing"
     xdotool type --delay 100 nihao
     xdotool key space
     end=$(($(date +%s) + 10))
