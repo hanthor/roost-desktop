@@ -393,6 +393,20 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Send GNOME's Multitasking and window-manager preferences
+    /// (#337). Returns the request id.
+    pub fn set_wm_settings(
+        &mut self,
+        settings: tuna_shell_control::WmSettings,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetWmSettings(settings),
+        })?;
+        Ok(id)
+    }
+
     /// Tell the compositor whether the overview shows the app grid, so
     /// it draws the workspaces as thumbnails. Returns the request id.
     pub fn set_overview_app_grid(&mut self, active: bool) -> Result<u64, ControlError> {

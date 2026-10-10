@@ -258,6 +258,9 @@ pub struct WorkspaceSlide {
     frame: Option<Duration>,
     record: Option<SlideRecord>,
     finished: VecDeque<SlideRecord>,
+    /// GNOME's fixed workspace count: no trailing empty workspace to
+    /// swipe onto past it.
+    limit: Option<u32>,
 }
 
 impl Default for WorkspaceSlide {
@@ -272,6 +275,7 @@ impl Default for WorkspaceSlide {
             frame: None,
             record: None,
             finished: VecDeque::new(),
+            limit: None,
         }
     }
 }
@@ -284,6 +288,11 @@ pub struct Placement {
 }
 
 impl WorkspaceSlide {
+    /// GNOME's fixed workspace count (`None` while dynamic).
+    pub fn set_limit(&mut self, limit: Option<u32>) {
+        self.limit = limit;
+    }
+
     /// Whether a motion is drawn (motion off draws nothing).
     pub fn running(&self) -> bool {
         Motion::of(self.policy) != Motion::Off && !matches!(self.phase, Phase::Idle)
@@ -532,7 +541,7 @@ impl WorkspaceSlide {
         self.distance = f64::from(output_width + WORKSPACE_SPACING);
         self.last_value = self.value(now);
         // GNOME keeps an empty workspace after the last: swiping onto it
-        // creates it.
+        // creates it. A fixed count has none.
         let trailing = workspaces
             .iter()
             .chain([&active])
@@ -540,7 +549,11 @@ impl WorkspaceSlide {
             .copied()
             .unwrap_or(0)
             + 1;
-        self.merge_strip(workspaces, &[active, trailing]);
+        if self.limit.is_some_and(|count| trailing >= count) {
+            self.merge_strip(workspaces, &[active]);
+        } else {
+            self.merge_strip(workspaces, &[active, trailing]);
+        }
         let progress = match self.last_value {
             Some(shown) => shown,
             None => self.slot(active).unwrap_or(0.0),

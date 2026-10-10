@@ -90,6 +90,7 @@ pub mod unlock;
 pub mod wallpaper;
 pub mod window_icons;
 pub mod windows;
+pub mod wm_prefs;
 pub mod workspace_slide;
 #[cfg(feature = "xwayland")]
 mod x11_icons;

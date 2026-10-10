@@ -70,6 +70,8 @@ const A11Y_INTERFACE_SCHEMA: &str = "org.gnome.desktop.a11y.interface";
 const NOTIFICATIONS_SCHEMA: &str = "org.gnome.desktop.notifications";
 const COLOR_SCHEMA: &str = "org.gnome.settings-daemon.plugins.color";
 const SESSION_SCHEMA: &str = "org.gnome.desktop.session";
+const MUTTER_PREFS_SCHEMA: &str = "org.gnome.mutter";
+const WM_PREFS_SCHEMA: &str = "org.gnome.desktop.wm.preferences";
 const SHELL_SCHEMA: &str = "org.gnome.shell";
 const SCREENSAVER_SCHEMA: &str = "org.gnome.desktop.screensaver";
 
@@ -86,6 +88,44 @@ fn settings(schema: &str) -> Option<gio::Settings> {
     let source = gio::SettingsSchemaSource::default()?;
     source.lookup(schema, true)?;
     Some(gio::Settings::new(schema))
+}
+
+/// Whether `settings` carries `key`: unknown schemas and keys read as
+/// their GNOME default, never a critical log.
+fn has_key(settings: &Option<gio::Settings>, key: &str) -> bool {
+    settings.as_ref().is_some_and(|s| {
+        s.settings_schema()
+            .is_some_and(|schema| schema.has_key(key))
+    })
+}
+
+/// A boolean key, or `fallback` when the schema or key is absent.
+fn flag(settings: &Option<gio::Settings>, key: &str, fallback: bool) -> bool {
+    if has_key(settings, key) {
+        settings.as_ref().map_or(fallback, |s| s.boolean(key))
+    } else {
+        fallback
+    }
+}
+
+/// A string key, or `fallback` when the schema or key is absent.
+fn word(settings: &Option<gio::Settings>, key: &str, fallback: &str) -> String {
+    if has_key(settings, key) {
+        settings
+            .as_ref()
+            .map_or_else(|| fallback.to_owned(), |s| s.string(key).to_string())
+    } else {
+        fallback.to_owned()
+    }
+}
+
+/// An int key, or `fallback` when the schema or key is absent.
+fn count(settings: &Option<gio::Settings>, key: &str, fallback: i32) -> i32 {
+    if has_key(settings, key) {
+        settings.as_ref().map_or(fallback, |s| s.int(key))
+    } else {
+        fallback
+    }
 }
 
 fn is_would_block(e: &ControlError) -> bool {
@@ -1957,6 +1997,60 @@ fn build(app: &adw::Application) {
             settings.connect_changed(None, move |_, _| send());
         }
         std::mem::forget(all);
+    }
+
+    // GNOME's Multitasking and window-manager preferences (#337): fixed
+    // versus dynamic workspaces, edge tiling, focus policy and mouse
+    // behavior, sent now and on every change.
+    {
+        let mutter = settings(MUTTER_PREFS_SCHEMA);
+        let prefs = settings(WM_PREFS_SCHEMA);
+        let send: Rc<dyn Fn()> = {
+            let (shell, mutter, prefs) = (shell.clone(), mutter.clone(), prefs.clone());
+            Rc::new(move || {
+                use tuna_shell_control::{FocusMode, FocusNewWindows, WmSettings};
+
+                let modifier_bits = logic::mouse_button_modifier_bits(&word(
+                    &prefs,
+                    "mouse-button-modifier",
+                    "<Super>",
+                ));
+                let out = WmSettings {
+                    dynamic_workspaces: flag(&mutter, "dynamic-workspaces", true),
+                    num_workspaces: count(&prefs, "num-workspaces", 4).max(1) as u32,
+                    workspaces_only_on_primary: flag(&mutter, "workspaces-only-on-primary", true),
+                    edge_tiling: flag(&mutter, "edge-tiling", true),
+                    focus_mode: FocusMode::from_nick(&word(&prefs, "focus-mode", "click")),
+                    focus_change_on_pointer_rest: flag(
+                        &mutter,
+                        "focus-change-on-pointer-rest",
+                        true,
+                    ),
+                    focus_new_windows: FocusNewWindows::from_nick(&word(
+                        &prefs,
+                        "focus-new-windows",
+                        "smart",
+                    )),
+                    auto_raise: flag(&prefs, "auto-raise", false),
+                    auto_raise_delay_ms: count(&prefs, "auto-raise-delay", 500).max(0) as u32,
+                    raise_on_click: flag(&prefs, "raise-on-click", true),
+                    mouse_button_modifier: modifier_bits,
+                    resize_with_right_button: flag(&prefs, "resize-with-right-button", false),
+                    attach_modal_dialogs: flag(&mutter, "attach-modal-dialogs", true),
+                    center_new_windows: flag(&mutter, "center-new-windows", false),
+                };
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.set_wm_settings(out);
+                }
+            })
+        };
+        send();
+        for settings in [mutter, prefs].into_iter().flatten() {
+            let send = send.clone();
+            settings.connect_changed(None, move |_, _| send());
+            // Keep the settings object (and its signal) alive.
+            std::mem::forget(settings);
+        }
     }
 
     // GNOME's idle and lock settings drive the compositor's idle lock

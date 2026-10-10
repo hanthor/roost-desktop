@@ -112,6 +112,9 @@ pub struct StateModel {
     focused: Option<u64>,
     next_id: u64,
     changes: VecDeque<(u64, StateChange)>,
+    /// GNOME's fixed workspace count (`dynamic-workspaces` off), or
+    /// `None` for dynamic workspaces.
+    fixed: Option<u32>,
 }
 
 impl Default for StateModel {
@@ -125,6 +128,7 @@ impl Default for StateModel {
             focused: None,
             next_id: 1,
             changes: VecDeque::new(),
+            fixed: None,
         }
     }
 }
@@ -173,6 +177,9 @@ impl StateModel {
         if self.active == workspace {
             return true;
         }
+        if !self.workspace_allowed(workspace) {
+            return false;
+        }
         let previous = self.active;
         self.active = workspace;
         self.register_workspace(workspace);
@@ -186,9 +193,72 @@ impl StateModel {
 
     /// Drop workspace ids with no windows except the active one. The
     /// list converges through snapshots; removals carry no delta op.
+    /// Fixed workspaces all stay, empty or not.
     fn prune_workspaces(&mut self) {
+        if let Some(count) = self.fixed {
+            self.workspaces = (0..count).collect();
+            return;
+        }
         self.workspaces
             .retain(|id| *id == self.active || self.windows.values().any(|w| w.workspace == *id));
+    }
+
+    /// GNOME's fixed workspace count, or `None` while dynamic.
+    pub fn fixed_workspaces(&self) -> Option<u32> {
+        self.fixed
+    }
+
+    /// Whether `workspace` may exist: any id while dynamic, else one
+    /// below the fixed count.
+    pub fn workspace_allowed(&self, workspace: u32) -> bool {
+        self.fixed.is_none_or(|count| workspace < count)
+    }
+
+    /// Switch between dynamic workspaces (`None`) and a fixed count
+    /// (GNOME's `dynamic-workspaces` and `num-workspaces`). Shrinking
+    /// moves windows from removed workspaces onto the last one left, and
+    /// the active workspace with them, as Mutter does. Returns whether
+    /// anything changed.
+    pub fn set_fixed_workspaces(&mut self, fixed: Option<u32>) -> bool {
+        let fixed = fixed.map(|count| count.max(1));
+        if self.fixed == fixed {
+            return false;
+        }
+        self.fixed = fixed;
+        if let Some(count) = fixed {
+            let last = count - 1;
+            let stranded: Vec<u64> = self
+                .windows
+                .values()
+                .filter(|w| w.workspace > last)
+                .map(|w| w.id)
+                .collect();
+            for id in stranded {
+                self.update(
+                    id,
+                    WindowUpdate {
+                        workspace: Some(last),
+                        ..Default::default()
+                    },
+                );
+            }
+            if self.active > last {
+                let previous = self.active;
+                self.active = last;
+                self.commit(StateChange::ActiveWorkspaceChanged {
+                    previous,
+                    active: last,
+                });
+            }
+        }
+        self.prune_workspaces();
+        // The list itself converges through snapshots: bump so peers
+        // resnapshot even when no window or active change was logged.
+        self.commit(StateChange::ActiveWorkspaceChanged {
+            previous: self.active,
+            active: self.active,
+        });
+        true
     }
 
     /// Number of retained change-log entries (bounded by [`MAX_CHANGE_LOG`]).
@@ -242,6 +312,12 @@ impl StateModel {
     /// when the id is unknown. A workspace move registers the workspace if
     /// new. Appends `WindowUpdated`.
     pub fn update(&mut self, id: u64, patch: WindowUpdate) -> bool {
+        if patch
+            .workspace
+            .is_some_and(|workspace| !self.workspace_allowed(workspace))
+        {
+            return false;
+        }
         let Some(window) = self.windows.get_mut(&id) else {
             return false;
         };
@@ -269,6 +345,10 @@ impl StateModel {
     /// Insert a workspace before `at`, shifting later windows and the active
     /// workspace, then place the dragged window in the new slot.
     pub fn insert_workspace_and_move(&mut self, id: u64, at: u32) -> bool {
+        // A fixed count never grows a workspace.
+        if self.fixed.is_some() {
+            return false;
+        }
         if !self.windows.contains_key(&id)
             || self.workspaces.iter().any(|&w| w >= at && w == u32::MAX)
         {
@@ -958,6 +1038,49 @@ mod tests {
         let a = m.insert("a", None, 3);
         assert_eq!(m.workspaces(), &[0, 3]);
         assert!(m.remove(a));
+        assert_eq!(m.workspaces(), &[0]);
+    }
+
+    #[test]
+    fn fixed_workspaces_keep_every_one_and_refuse_past_the_count() {
+        let mut m = StateModel::new();
+        assert!(m.set_fixed_workspaces(Some(3)));
+        assert_eq!(m.workspaces(), &[0, 1, 2]);
+        assert!(!m.set_fixed_workspaces(Some(3)), "unchanged is a no-op");
+        // Empty fixed workspaces survive switching away.
+        assert!(m.set_active_workspace(2));
+        assert!(m.set_active_workspace(0));
+        assert_eq!(m.workspaces(), &[0, 1, 2]);
+        // Nothing past the count: no switch, no move, no new workspace.
+        assert!(!m.set_active_workspace(3));
+        let a = m.insert("a", None, 0);
+        assert!(!m.update(
+            a,
+            WindowUpdate {
+                workspace: Some(3),
+                ..Default::default()
+            }
+        ));
+        assert_eq!(m.window(a).unwrap().workspace, 0);
+        assert!(!m.insert_workspace_and_move(a, 1));
+    }
+
+    #[test]
+    fn shrinking_fixed_workspaces_moves_windows_to_the_last_one() {
+        let mut m = StateModel::new();
+        let a = m.insert("a", None, 0);
+        let b = m.insert("b", None, 3);
+        assert!(m.set_active_workspace(3));
+        assert!(m.set_fixed_workspaces(Some(2)));
+        assert_eq!(m.window(a).unwrap().workspace, 0);
+        assert_eq!(m.window(b).unwrap().workspace, 1, "Mutter's last workspace");
+        assert_eq!(m.active_workspace(), 1);
+        assert_eq!(m.workspaces(), &[0, 1]);
+        // Back to dynamic: empty non-active workspaces prune again.
+        assert!(m.set_fixed_workspaces(None));
+        assert!(m.set_active_workspace(0));
+        assert_eq!(m.workspaces(), &[0, 1]);
+        assert!(m.remove(b));
         assert_eq!(m.workspaces(), &[0]);
     }
 }

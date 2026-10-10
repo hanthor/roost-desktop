@@ -1596,8 +1596,26 @@ pub fn layout(
     active: u32,
     windows: &[OverviewWindow],
 ) -> OverviewLayout {
+    layout_shown(
+        output,
+        work_top,
+        &shown_workspaces(workspaces, windows),
+        active,
+        windows,
+    )
+}
+
+/// [`layout`] over a precomputed workspace list: fixed counts pass the
+/// model's list through, dynamic ones the [`shown_workspaces`] view, so
+/// the trailing empty workspace never doubles (#337).
+pub fn layout_shown(
+    output: Rectangle<i32, Logical>,
+    work_top: i32,
+    workspaces: &[u32],
+    active: u32,
+    windows: &[OverviewWindow],
+) -> OverviewLayout {
     let mut out = OverviewLayout::default();
-    let workspaces = shown_workspaces(workspaces, windows);
     let index = workspaces.iter().position(|w| *w == active).unwrap_or(0);
     let neighbors = [
         (index.checked_sub(1), -1),
@@ -1607,7 +1625,7 @@ pub fn layout(
     let strip = workspaces.len() >= THUMBNAILS_MIN_WORKSPACES;
     let shift = if strip { thumbnails_offset(work_h) } else { 0 };
     if strip {
-        thumbnails(&mut out, output, work_top, &workspaces, active, windows);
+        thumbnails(&mut out, output, work_top, workspaces, active, windows);
     }
     let active_card = card_rect(output, work_top, 0, shift);
     for (slot, offset) in neighbors {
@@ -1868,8 +1886,25 @@ pub fn app_grid_layout(
     active: u32,
     windows: &[OverviewWindow],
 ) -> OverviewLayout {
+    app_grid_layout_shown(
+        output,
+        work_top,
+        &shown_workspaces(workspaces, windows),
+        active,
+        windows,
+    )
+}
+
+/// [`app_grid_layout`] over a precomputed workspace list, as
+/// [`layout_shown`] is for [`layout`] (#337).
+pub fn app_grid_layout_shown(
+    output: Rectangle<i32, Logical>,
+    work_top: i32,
+    shown: &[u32],
+    active: u32,
+    windows: &[OverviewWindow],
+) -> OverviewLayout {
     let mut out = OverviewLayout::default();
-    let shown = shown_workspaces(workspaces, windows);
     let work_h = (output.size.h - work_top).max(1);
     let w = (f64::from(output.size.w) * THUMBNAIL_SCALE).round();
     let h = (f64::from(work_h) * THUMBNAIL_SCALE).round();

@@ -266,6 +266,22 @@ mod tests {
     }
 
     #[test]
+    fn mouse_button_modifier_chords_become_compositor_bits() {
+        use tuna_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+
+        assert_eq!(mouse_button_modifier_bits("<Super>"), MOD_LOGO);
+        assert_eq!(mouse_button_modifier_bits("<Alt>"), MOD_ALT);
+        assert_eq!(
+            mouse_button_modifier_bits("<Super><Shift>"),
+            MOD_LOGO | MOD_SHIFT
+        );
+        assert_eq!(mouse_button_modifier_bits("<Primary>"), MOD_CTRL);
+        // Empty disables drags; an unknown nick keeps GNOME's chord.
+        assert_eq!(mouse_button_modifier_bits(""), 0);
+        assert_eq!(mouse_button_modifier_bits("banana"), MOD_LOGO);
+    }
+
+    #[test]
     fn lock_screen_text_matches_gnome_51() {
         let t = jiff::civil::date(2026, 10, 1).at(22, 38, 0, 0);
         assert_eq!(lock_clock_text(&t, ClockFormat::TwentyFourHour), "22:38");
@@ -857,6 +873,31 @@ mod idle_tests {
         // A slowed fade (factor 4) outlasts a short lock delay, as in GNOME.
         assert_eq!(idle_lock_ms(300, true, 30, 4 * IDLE_FADE_MS), 340_000);
     }
+}
+
+/// `mouse-button-modifier` (`<Super>`, `<Alt>` chords) as the
+/// compositor's modifier bits. An explicitly empty nick disables
+/// modifier drags; an unrecognized one keeps GNOME's default chord.
+pub fn mouse_button_modifier_bits(nick: &str) -> u32 {
+    use tuna_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+
+    let mut bits = 0;
+    if nick.contains("<Shift>") {
+        bits |= MOD_SHIFT;
+    }
+    if nick.contains("<Control>") || nick.contains("<Primary>") {
+        bits |= MOD_CTRL;
+    }
+    if nick.contains("<Alt>") {
+        bits |= MOD_ALT;
+    }
+    if nick.contains("<Super>") || nick.contains("<Meta>") {
+        bits |= MOD_LOGO;
+    }
+    if bits == 0 && !nick.is_empty() {
+        bits = MOD_LOGO;
+    }
+    bits
 }
 
 /// GNOME touchpad orientation can override or follow the mouse preference.

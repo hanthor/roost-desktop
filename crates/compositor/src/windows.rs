@@ -46,6 +46,8 @@ use crate::{
 };
 use tuna_shell_control::{switcher_keys, SwitcherAction, PANEL_HEIGHT};
 
+mod prefs;
+
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
@@ -315,6 +317,19 @@ pub struct WindowManager {
     /// Maximize/tile/fullscreen transitions (#496): layout changes
     /// queue here and the runtime draws them.
     size_changes: crate::size_change::SizeChanges<crate::size_change::Snapshot>,
+    /// GNOME's Multitasking and window-manager preferences (#337, #347).
+    prefs: tuna_shell_control::WmSettings,
+    /// Focus-follows-mouse state (sloppy and mouse focus modes).
+    hover: crate::wm_prefs::HoverFocus,
+    /// Focus without raising (hover focus, `raise-on-click` off).
+    hold_stacking: bool,
+    /// Output rectangles and which is primary, from the last reconcile.
+    output_rects: Vec<(Rectangle<i32, Logical>, bool)>,
+    /// Geometry to give back on the next axis-maximize toggle, per
+    /// window and axis (`true` vertical).
+    axis_restore: HashMap<(u64, bool), Rectangle<i32, Logical>>,
+    /// Windows Show Desktop hid, to bring back on the next press.
+    showing_desktop: Vec<u64>,
 }
 
 impl WindowManager {
@@ -376,6 +391,12 @@ impl WindowManager {
             overview_held: None,
             exclusive_held: None,
             size_changes: Default::default(),
+            prefs: Default::default(),
+            hover: Default::default(),
+            hold_stacking: false,
+            output_rects: Vec::new(),
+            axis_restore: HashMap::new(),
+            showing_desktop: Vec::new(),
         }
     }
 
@@ -412,7 +433,7 @@ impl WindowManager {
                 Some(crate::overview::OverviewWindow {
                     id: *id,
                     // A sticky window sits on whichever workspace shows.
-                    workspace: if window.sticky {
+                    workspace: if window.sticky || self.on_every_workspace(*id) {
                         self.model.active_workspace()
                     } else {
                         entry.workspace
@@ -684,7 +705,7 @@ impl WindowManager {
             .filter_map(|id| {
                 let window = self.windows.get(id).filter(|w| !w.minimized)?;
                 let mut geometry = self.shifted(*id, window.geometry);
-                if !window.sticky {
+                if !self.on_every_workspace(*id) {
                     let workspace = self.model.window(*id)?.workspace;
                     geometry.loc.x += self.workspace_slide.frame_placement(workspace)?.dx;
                 }
@@ -701,7 +722,7 @@ impl WindowManager {
         }
         self.windows
             .iter()
-            .find(|(_, w)| w.surface == *window && !w.sticky)
+            .find(|(id, w)| w.surface == *window && !self.on_every_workspace(**id))
             .and_then(|(id, _)| self.model.window(*id))
             .and_then(|entry| self.workspace_slide.frame_placement(entry.workspace))
             .map_or(1.0, |placement| placement.alpha)
@@ -719,7 +740,7 @@ impl WindowManager {
     /// How far the workspace switch shifts `id` this frame (0 when no
     /// switch is drawn or the window is on every workspace).
     pub fn slide_dx(&self, id: u64) -> i32 {
-        if !self.workspace_slide.running() || self.windows.get(&id).is_none_or(|w| w.sticky) {
+        if !self.workspace_slide.running() || self.on_every_workspace(id) {
             return 0;
         }
         self.model
@@ -758,7 +779,7 @@ impl WindowManager {
                 self.model
                     .window(*id)
                     .is_some_and(|entry| entry.workspace == active)
-                    || self.windows.get(id).is_some_and(|w| w.sticky)
+                    || self.on_every_workspace(*id)
             })
             .filter_map(|id| {
                 self.windows
@@ -810,6 +831,7 @@ impl WindowManager {
     }
 
     pub fn reconcile(&mut self, state: &mut State) {
+        self.refresh_outputs(state);
         // Popups (#88): drop dead trees, and once the last grabbed popup
         // is gone hand keyboard focus back to the focused window.
         state.popups.cleanup();
@@ -1054,6 +1076,13 @@ impl WindowManager {
         if self.overview_held.is_some() {
             self.focus_parked(Some(id));
         }
+        // GNOME's `focus-new-windows` strict policy leaves focus where
+        // it is and opens the window just below the focused one.
+        if !self.new_window_takes_focus(id) {
+            self.stack_below_focus(id);
+            self.configure(id, false);
+            return;
+        }
         self.apply_focus(state, Some(id));
     }
 
@@ -1120,7 +1149,8 @@ impl WindowManager {
             work.loc.y + (work.size.h - size.h) / 2,
         )
             .into();
-        let mut loc = if others.is_empty() {
+        // GNOME's `center-new-windows` centers every new window.
+        let mut loc = if others.is_empty() || self.prefs.center_new_windows {
             centered
         } else {
             next_cascade(centered, others, size, work)
@@ -1556,13 +1586,7 @@ impl WindowManager {
                 let Some(w) = self.windows.get(child) else {
                     return false;
                 };
-                let modal = w.x11_parent.is_some()
-                    || match w.surface.underlying_surface() {
-                        WindowSurface::Wayland(toplevel) => read_modal(toplevel),
-                        #[cfg(feature = "xwayland")]
-                        WindowSurface::X11(_) => false,
-                    };
-                !w.minimized && modal && self.transient_parent(*child) == Some(id)
+                !w.minimized && self.is_modal(*child) && self.transient_parent(*child) == Some(id)
             });
             match dialog {
                 Some(child) => id = child,
@@ -1570,6 +1594,19 @@ impl WindowManager {
             }
         }
         id
+    }
+
+    /// Whether `id` is a modal dialog (xdg-dialog, or a trusted X11
+    /// transient).
+    fn is_modal(&self, id: u64) -> bool {
+        self.windows.get(&id).is_some_and(|w| {
+            w.x11_parent.is_some()
+                || match w.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel) => read_modal(toplevel),
+                    #[cfg(feature = "xwayland")]
+                    WindowSurface::X11(_) => false,
+                }
+        })
     }
 
     /// Focus while the overview holds the keyboard: the window is the
@@ -1618,7 +1655,7 @@ impl WindowManager {
             // Floating stacks raise focus to the top; the strip keeps
             // column order independent of focus (niri shape), so focus
             // never reorders in scroll mode.
-            if self.mode == SessionMode::Gnome {
+            if self.mode == SessionMode::Gnome && !self.hold_stacking {
                 self.stacking.retain(|other| *other != id);
                 self.stacking.push(id);
                 self.keep_above_on_top();
@@ -1755,6 +1792,8 @@ impl WindowManager {
     }
 
     fn begin_move_from(&mut self, state: &mut State, id: u64, pointer: Point<f64, Logical>) {
+        // Dragging an attached modal dialog moves its parent.
+        let id = self.drag_root(id);
         self.settle(id);
         if self.mode == SessionMode::Scroll {
             return;
@@ -1838,6 +1877,7 @@ impl WindowManager {
                     )
                         .into();
                 }
+                self.follow_parent(id);
             }
             PointerGrab::Resize {
                 id,
@@ -1868,7 +1908,11 @@ impl WindowManager {
             return;
         };
         if let PointerGrab::Move { id, .. } = grab {
-            match snap_target(self.pointer_pos, state.primary_size().w) {
+            let snap = self
+                .edge_tiling()
+                .then(|| snap_target(self.pointer_pos, state.primary_size().w))
+                .flatten();
+            match snap {
                 Some(Snap::Maximize) => {
                     self.set_maximized(state, id, true);
                 }
@@ -1887,6 +1931,9 @@ impl WindowManager {
         let Some(PointerGrab::Move { id, .. }) = self.grab else {
             return None;
         };
+        if !self.edge_tiling() {
+            return None;
+        }
         let rect = match snap_target(self.pointer_pos, state.primary_size().w)? {
             Snap::Maximize => Self::work_area(state),
             Snap::Tile(side) => Self::tile_area(state, side),
@@ -1941,7 +1988,7 @@ impl WindowManager {
         let active = self.model.active_workspace();
         self.stacking.iter().rev().copied().find(|id| {
             self.model.window(*id).is_some_and(|entry| {
-                entry.workspace == active
+                (entry.workspace == active || self.on_every_workspace(*id))
                     && self
                         .windows
                         .get(id)
@@ -2024,7 +2071,10 @@ impl WindowManager {
         }
         // Pointer focus is the window under the pointer, or nothing over
         // the bare desktop. Keyboard focus and stacking change only on a
-        // click (GNOME's default click-to-focus), never on motion.
+        // click under GNOME's default click-to-focus; the sloppy and
+        // mouse focus modes move keyboard focus here too, never raising.
+        let hovered = self.hover_target(pos);
+        self.hover_motion(state, hovered, pos);
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
@@ -2096,23 +2146,18 @@ impl WindowManager {
                 }
             }
         }
-        // Super+press on a window starts a move (GNOME's Super+drag).
-        if pressed && self.super_held && !self.overview_open {
+        // GNOME's `mouse-button-modifier` (Super by default) plus a
+        // button on a window: move, resize or the window menu.
+        if pressed && !self.overview_open {
             let pos = self.pointer_pos;
             if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
                 .is_none()
                 && self.popup_at(state, pos).is_none()
+                && self.modifier_press(state, button)
             {
-                if let Some(id) = self.window_at(pos) {
-                    self.apply_focus(state, Some(id));
-                    // The trigger machine already disarmed the Super tap on
-                    // this press, so releasing Super will not open the
-                    // overview.
-                    self.begin_move(state, id);
-                    // The press is not delivered, so neither is its release.
-                    self.swallowed_button = Some(button);
-                    return;
-                }
+                // The press is not delivered, so neither is its release.
+                self.swallowed_button = Some(button);
+                return;
             }
         }
         let on_popup = self.popup_at(state, self.pointer_pos).is_some();
@@ -2158,9 +2203,7 @@ impl WindowManager {
                     .keyboard
                     .as_ref()
                     .is_none_or(|keyboard| keyboard.current_focus() == self.surface_of(id));
-                if self.model.focused() != Some(id) || !keyboard_matches {
-                    self.apply_focus(state, Some(id));
-                }
+                self.click_focus(state, id, keyboard_matches);
             }
         }
         // Mapping, closing or restacking a surface can change what lies
@@ -2440,6 +2483,11 @@ impl WindowManager {
         self.windows.get(&id).is_some_and(|w| w.minimized)
     }
 
+    /// Model ids bottom-to-top, for the state proof (#347).
+    pub fn stacking_order(&self) -> Vec<u64> {
+        self.stacking.clone()
+    }
+
     /// Whether `id` is maximized.
     pub fn is_maximized(&self, id: u64) -> bool {
         self.windows
@@ -2504,6 +2552,14 @@ impl WindowManager {
                 self.keep_above_on_top();
                 true
             }
+            WindowAction::ToggleFullscreen
+            | WindowAction::Raise
+            | WindowAction::Lower
+            | WindowAction::RaiseOrLower
+            | WindowAction::MaximizeVertically
+            | WindowAction::MaximizeHorizontally
+            | WindowAction::MoveToMonitor { .. }
+            | WindowAction::MoveTo { .. } => self.extra_window_action(state, id, action),
             WindowAction::MoveToWorkspaceLeft | WindowAction::MoveToWorkspaceRight => {
                 let Some(current) = self.model.window(id).map(|e| e.workspace) else {
                     return false;
@@ -2530,12 +2586,15 @@ impl WindowManager {
 
     /// GNOME's popup for the active workspace: `(index, count)`.
     pub fn workspace_popup(&self) -> (u32, u32) {
-        let active = self.model.active_workspace();
-        let occupied = self.model.windows().map(|w| w.workspace).max();
-        (
-            active,
-            tuna_shell_control::dynamic_workspace_count(occupied, active),
-        )
+        (self.model.active_workspace(), self.workspace_count())
+    }
+
+    /// Whether the window has a workspace to its right: always with
+    /// dynamic workspaces, else below the fixed count.
+    pub fn workspace_right_of(&self, id: u64) -> bool {
+        self.model
+            .window(id)
+            .is_some_and(|e| self.model.workspace_allowed(e.workspace + 1))
     }
 
     /// Workspace-switcher popups since the last call.
@@ -3510,7 +3569,7 @@ impl WindowManager {
                 .model
                 .window(*id)
                 .is_some_and(|entry| entry.workspace == workspace)
-                || self.windows.get(id).is_some_and(|w| w.sticky))
+                || self.on_every_workspace(*id))
                 && self.windows.get(id).is_some_and(|w| !w.minimized)
         });
         // In the overview a workspace switch moves the activated look
