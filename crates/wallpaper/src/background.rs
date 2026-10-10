@@ -33,40 +33,46 @@ pub fn render(
     settings: PictureSettings,
     g: Geometry,
 ) -> Option<Vec<u8>> {
-    if !g.valid() {
+    render_blend(image, None, 0.0, settings, g)
+}
+
+/// Place each keyframe independently, blend premultiplied contributions, then
+/// add the selected pattern under the resulting transparency (Mutter ordering).
+pub fn render_blend(
+    from: Option<&RgbaImage>,
+    to: Option<&RgbaImage>,
+    progress: f64,
+    settings: PictureSettings,
+    g: Geometry,
+) -> Option<Vec<u8>> {
+    if !g.valid() || !progress.is_finite() || !(0.0..=1.0).contains(&progress) {
         return None;
     }
     let [w, h] = g.physical;
-    let image = image.filter(|im| im.width() > 0 && im.height() > 0);
+    let from = from.filter(|im| im.width() > 0 && im.height() > 0);
+    let to = to.filter(|im| im.width() > 0 && im.height() > 0);
     let mut result = vec![0; w as usize * h as usize * 4];
     for y in 0..h {
         for x in 0..w {
-            // Mutter uses a two-texel LINEAR/CLAMP texture with normalized
-            // coordinates: its first/last quarters retain the endpoint colors.
-            let progress = match settings.shading {
-                Shading::Solid => 0.0,
-                Shading::Horizontal => {
-                    (2.0 * (f64::from(x) + 0.5) / f64::from(w) - 0.5).clamp(0.0, 1.0)
-                }
-                Shading::Vertical => {
-                    (2.0 * (f64::from(y) + 0.5) / f64::from(h) - 0.5).clamp(0.0, 1.0)
-                }
-            };
-            let mut color = [0.0; 3];
-            for (channel, value) in color.iter_mut().enumerate() {
-                *value = f64::from(settings.primary[channel]) * (1.0 - progress)
-                    + f64::from(settings.secondary[channel]) * progress;
-            }
-            if let Some(im) = image {
-                if let Some((sx, sy, repeat)) =
-                    source_coordinate(settings.placement, g, im.width(), im.height(), x, y)
-                {
-                    let sample = sample(im, sx, sy, repeat);
-                    let alpha = sample[3] / 255.0;
-                    for channel in 0..3 {
-                        color[channel] = sample[channel] * alpha + color[channel] * (1.0 - alpha);
+            let mut color = pattern(settings, g, x, y);
+            let mut premultiplied = [0.0; 3];
+            let mut coverage = 0.0;
+            for (image, weight) in [(from, 1.0 - progress), (to, progress)] {
+                if let Some(im) = image {
+                    if let Some((sx, sy, repeat)) =
+                        source_coordinate(settings.placement, g, im.width(), im.height(), x, y)
+                    {
+                        let sample = sample(im, sx, sy, repeat);
+                        let alpha = sample[3] / 255.0 * weight;
+                        coverage += alpha;
+                        for channel in 0..3 {
+                            premultiplied[channel] += sample[channel] * alpha;
+                        }
                     }
                 }
+            }
+            for channel in 0..3 {
+                color[channel] = premultiplied[channel] + color[channel] * (1.0 - coverage);
             }
             let pos = (y as usize * w as usize + x as usize) * 4;
             result[pos..pos + 4].copy_from_slice(&[
@@ -78,6 +84,98 @@ pub fn render(
         }
     }
     Some(result)
+}
+
+/// Premultiplied independently placed image contribution. Large outputs retain
+/// direct worker composition instead of an unbounded additional float cache.
+#[derive(Debug)]
+pub struct PlacedImage {
+    pub physical: [u32; 2],
+    pub pixels: Vec<[f64; 4]>,
+}
+impl PlacedImage {
+    pub fn bytes(&self) -> usize {
+        self.pixels.len() * std::mem::size_of::<[f64; 4]>()
+    }
+}
+pub fn place(image: &RgbaImage, placement: Placement, g: Geometry) -> Option<PlacedImage> {
+    let bytes = u64::from(g.physical[0]) * u64::from(g.physical[1]) * 32;
+    if !g.valid() || bytes > 64 * 1024 * 1024 || image.width() == 0 || image.height() == 0 {
+        return None;
+    }
+    let mut pixels = vec![[0.0; 4]; (bytes / 32) as usize];
+    for y in 0..g.physical[1] {
+        for x in 0..g.physical[0] {
+            if let Some((sx, sy, repeat)) =
+                source_coordinate(placement, g, image.width(), image.height(), x, y)
+            {
+                let value = sample(image, sx, sy, repeat);
+                let alpha = value[3] / 255.0;
+                pixels[(y * g.physical[0] + x) as usize] =
+                    [value[0] * alpha, value[1] * alpha, value[2] * alpha, alpha];
+            }
+        }
+    }
+    Some(PlacedImage {
+        physical: g.physical,
+        pixels,
+    })
+}
+pub fn render_placed_blend(
+    from: Option<&PlacedImage>,
+    to: Option<&PlacedImage>,
+    progress: f64,
+    settings: PictureSettings,
+    g: Geometry,
+) -> Option<Vec<u8>> {
+    if !g.valid()
+        || !progress.is_finite()
+        || !(0.0..=1.0).contains(&progress)
+        || [from, to].into_iter().flatten().any(|p| {
+            p.physical != g.physical
+                || p.pixels.len() != g.physical[0] as usize * g.physical[1] as usize
+        })
+    {
+        return None;
+    }
+    let mut result = vec![0; g.physical[0] as usize * g.physical[1] as usize * 4];
+    for y in 0..g.physical[1] {
+        for x in 0..g.physical[0] {
+            let index = (y * g.physical[0] + x) as usize;
+            let mut value = [0.0; 4];
+            for (frame, weight) in [(from, 1.0 - progress), (to, progress)] {
+                if let Some(frame) = frame {
+                    for (channel, target) in value.iter_mut().enumerate() {
+                        *target += frame.pixels[index][channel] * weight;
+                    }
+                }
+            }
+            let pattern = pattern(settings, g, x, y);
+            let color = [0, 1, 2].map(|channel| {
+                (value[channel] + pattern[channel] * (1.0 - value[3]))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            });
+            result[index * 4..index * 4 + 4].copy_from_slice(&[color[2], color[1], color[0], 255]);
+        }
+    }
+    Some(result)
+}
+fn pattern(settings: PictureSettings, g: Geometry, x: u32, y: u32) -> [f64; 3] {
+    let [w, h] = g.physical;
+    // Mutter uses a two-texel LINEAR/CLAMP texture with normalized
+    // coordinates: its first/last quarters retain the endpoint colors.
+    let progress = match settings.shading {
+        Shading::Solid => 0.0,
+        Shading::Horizontal => (2.0 * (f64::from(x) + 0.5) / f64::from(w) - 0.5).clamp(0.0, 1.0),
+        Shading::Vertical => (2.0 * (f64::from(y) + 0.5) / f64::from(h) - 0.5).clamp(0.0, 1.0),
+    };
+    let mut color = [0.0; 3];
+    for (channel, value) in color.iter_mut().enumerate() {
+        *value = f64::from(settings.primary[channel]) * (1.0 - progress)
+            + f64::from(settings.secondary[channel]) * progress;
+    }
+    color
 }
 
 fn source_coordinate(
@@ -210,6 +308,54 @@ mod tests {
             secondary: [255, 0, 0],
             shading: Shading::Solid,
         }
+    }
+    #[test]
+    fn blend_places_each_image_before_transparent_underlay() {
+        let a = RgbaImage::from_pixel(2, 2, image::Rgba([240, 0, 0, 128]));
+        let b = RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 240, 255]));
+        let bytes = render_blend(
+            Some(&a),
+            Some(&b),
+            0.5,
+            settings(Placement::Centered),
+            geometry(4, 2),
+        )
+        .unwrap();
+        // Left edge contains only B: half opaque blue + half opaque green.
+        assert_eq!(pixel(&bytes, 4, 0, 0), [120, 128, 0, 255]);
+        // Center includes separately placed translucent A and opaque B.
+        assert_eq!(pixel(&bytes, 4, 1, 0), [120, 64, 60, 255]);
+        let placed_a = place(&a, Placement::Centered, geometry(4, 2)).unwrap();
+        let placed_b = place(&b, Placement::Centered, geometry(4, 2)).unwrap();
+        assert_eq!(
+            render_placed_blend(
+                Some(&placed_a),
+                Some(&placed_b),
+                0.5,
+                settings(Placement::Centered),
+                geometry(4, 2)
+            )
+            .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            render_blend(
+                Some(&a),
+                Some(&b),
+                0.0,
+                settings(Placement::Centered),
+                geometry(4, 2)
+            ),
+            render(Some(&a), settings(Placement::Centered), geometry(4, 2))
+        );
+        assert!(render_blend(
+            Some(&a),
+            Some(&b),
+            f64::NAN,
+            settings(Placement::Zoom),
+            geometry(4, 2)
+        )
+        .is_none());
     }
     #[test]
     fn static_modes_reveal_distinct_real_image_regions() {

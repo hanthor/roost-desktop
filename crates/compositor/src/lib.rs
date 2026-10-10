@@ -7,6 +7,10 @@
 //! the [`TestCompositor`] helper drives the display manually so
 //! integration tests stay deterministic without an event loop or GPU.
 
+// The compositor state snapshot is one large `serde_json::json!` object,
+// which outgrows the default macro recursion limit.
+#![recursion_limit = "256"]
+
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
@@ -83,6 +87,7 @@ pub mod session_services;
 pub mod size_change;
 #[cfg(feature = "drm")]
 pub mod sleep;
+pub mod slideshow;
 pub mod spring;
 pub mod state;
 pub mod supervise;

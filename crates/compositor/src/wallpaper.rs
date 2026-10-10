@@ -9,6 +9,7 @@
 //! failure — missing file, unparsable URI, undecodable image,
 //! oversized output — degrades to the solid clear, never an error.
 
+use crate::slideshow::{Sample, Timeline, MAX_XML_BYTES};
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
@@ -89,6 +90,8 @@ pub fn wallpaper_uri_to_path(uri: &str) -> Option<PathBuf> {
 /// Cached wallpaper image, re-scaled to the output that showed it.
 #[derive(Debug)]
 struct Loaded {
+    paint: Option<serde_json::Value>,
+    epoch: Option<String>,
     /// URI text that produced this image (or failed to).
     uri: String,
     /// Output size the pixels match (`None` when the URI failed).
@@ -122,7 +125,13 @@ pub struct Wallpaper {
     /// Journey-only observation of the last attempted refresh, not a paint claim.
     refresh_stage: Option<&'static str>,
     identities: Vec<IdentitySnapshot>,
-    identity_pending: Vec<(String, std::sync::mpsc::Receiver<Option<FileIdentity>>)>,
+    identity_pending: Vec<(
+        String,
+        std::sync::mpsc::Receiver<std::sync::Arc<SourceObservation>>,
+    )>,
+    animation_samples: Vec<AnimationSample>,
+    paint_state: Option<serde_json::Value>,
+    image_cache: std::sync::Arc<BackgroundCaches>,
     /// Decodes running on worker threads, by URI and output size: a
     /// 4K JPEG XL takes long enough to stall frames, so the clear
     /// colour shows until the picture is ready (GNOME loads
@@ -160,6 +169,8 @@ pub fn parse_color(text: &str) -> Option<[f32; 3]> {
 
 #[derive(Debug)]
 struct Pending {
+    paint: Option<serde_json::Value>,
+    epoch: Option<String>,
     uri: String,
     size: Size<i32, Logical>,
     result: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
@@ -173,8 +184,52 @@ const MAX_WALLPAPER_SLOTS: usize = 4;
 #[derive(Debug)]
 struct IdentitySnapshot {
     uri: String,
-    value: Option<FileIdentity>,
+    value: std::sync::Arc<SourceObservation>,
     observed: std::time::Instant,
+}
+
+type ImageCache = std::sync::Mutex<Vec<(FileIdentity, std::sync::Arc<image::RgbaImage>)>>;
+
+type PlacedKey = (
+    FileIdentity,
+    tuna_shell_control::background::Placement,
+    Geometry,
+);
+type PlacementCache = std::sync::Mutex<
+    Vec<(
+        PlacedKey,
+        std::sync::Arc<tuna_wallpaper::background::PlacedImage>,
+    )>,
+>;
+#[derive(Debug, Default)]
+struct BackgroundCaches {
+    images: ImageCache,
+    placed: PlacementCache,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceObservation {
+    generation: String,
+    identity: Option<FileIdentity>,
+    xml: bool,
+    timeline: Option<Timeline>,
+    references: Vec<(PathBuf, Option<FileIdentity>)>,
+}
+#[derive(Debug)]
+struct AnimationSample {
+    key: String,
+    sampled_wall: f64,
+    sampled_mono: std::time::Instant,
+    sample: Sample,
+}
+type AnimationPaint = (Sample, Vec<(PathBuf, Option<FileIdentity>)>);
+
+#[derive(Debug, Clone)]
+struct Paint {
+    epoch: Option<String>,
+    uri: String,
+    identity: Option<FileIdentity>,
+    animation: Option<AnimationPaint>,
 }
 
 impl Wallpaper {
@@ -216,13 +271,20 @@ impl Wallpaper {
 
     /// Arbitrary configured paths can reside on slow network/FUSE mounts.
     /// Observe them only on bounded workers; the frame path uses snapshots.
+    #[cfg(test)]
     fn poll_identity(&mut self, uri: &str) -> Option<Option<FileIdentity>> {
+        self.poll_source(uri).map(|source| source.identity.clone())
+    }
+
+    fn poll_source(&mut self, uri: &str) -> Option<std::sync::Arc<SourceObservation>> {
         let mut index = 0;
         while index < self.identity_pending.len() {
             let result = match self.identity_pending[index].1.try_recv() {
                 Ok(value) => Some(value),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(std::sync::Arc::new(SourceObservation::default()))
+                }
             };
             if let Some(value) = result {
                 let (completed, _) = self.identity_pending.remove(index);
@@ -256,7 +318,7 @@ impl Wallpaper {
             if std::thread::Builder::new()
                 .name("tuna-wallpaper-identity".into())
                 .spawn(move || {
-                    let _ = send.send(FileIdentity::for_uri(&path));
+                    let _ = send.send(std::sync::Arc::new(SourceObservation::observe(&path)));
                 })
                 .is_ok()
             {
@@ -270,11 +332,10 @@ impl Wallpaper {
     fn poll_decode(
         &mut self,
         key: &str,
-        uri: &str,
+        paint: Paint,
         output: Size<i32, Logical>,
         settings: PictureSettings,
         geometry: Geometry,
-        identity: Option<FileIdentity>,
     ) {
         let index = self
             .pending
@@ -293,12 +354,33 @@ impl Wallpaper {
                 return;
             }
             let (send, result) = std::sync::mpsc::channel();
-            let job = uri.to_owned();
+            let epoch = paint.epoch.clone();
+            let paint_record = paint.animation.as_ref().map(|(sample,references)| serde_json::json!({
+                "sample_wall": sample.wall, "progress": sample.progress, "interval": sample.interval,
+                "from": sample.from, "to": sample.to, "slide": sample.slide,
+                "generation": epoch, "source_uri": paint.uri, "root_identity": format!("{:?}",paint.identity),
+                "source_identities": references.iter().map(|(path,id)| serde_json::json!({"path":path.to_string_lossy(),"identity":format!("{id:?}")})).collect::<Vec<_>>(), "geometry": {"physical":geometry.physical,
+                    "origin":geometry.origin,"desktop":geometry.desktop,"scale":geometry.scale()},
+            }));
+            let job = paint;
+            let image_cache = self.image_cache.clone();
             let spawned = std::thread::Builder::new()
                 .name("tuna-wallpaper".into())
                 .spawn(move || {
                     let started = std::time::Instant::now();
-                    let pixels = load_static_wallpaper(&job, settings, geometry, identity);
+                    let pixels = if let Some((sample, references)) = job.animation {
+                        load_animation_wallpaper(
+                            &job.uri,
+                            job.identity,
+                            sample,
+                            references,
+                            settings,
+                            geometry,
+                            &image_cache,
+                        )
+                    } else {
+                        load_static_wallpaper(&job.uri, settings, geometry, job.identity)
+                    };
                     eprintln!(
                         "tuna-compositor: wallpaper {} for {}x{} in {} ms",
                         if pixels.is_some() {
@@ -314,6 +396,8 @@ impl Wallpaper {
                 });
             if spawned.is_ok() {
                 self.pending.push(Pending {
+                    paint: paint_record,
+                    epoch,
                     uri: key.to_owned(),
                     size: output,
                     result,
@@ -326,7 +410,7 @@ impl Wallpaper {
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
         };
-        self.pending.remove(index);
+        let pending = self.pending.remove(index);
         if self.loaded.len() >= MAX_WALLPAPER_SLOTS {
             self.loaded.remove(0);
         }
@@ -341,6 +425,8 @@ impl Wallpaper {
             )
         });
         self.loaded.push(Loaded {
+            paint: pending.paint,
+            epoch: pending.epoch,
             uri: key.to_owned(),
             size: Some(output),
             pixels,
@@ -357,6 +443,10 @@ impl Wallpaper {
 
     /// GNOME's `primary-color` as last published, for the clear under
     /// the picture (and instead of it when there is none).
+    pub fn paint_state(&self) -> Option<&serde_json::Value> {
+        self.paint_state.as_ref()
+    }
+
     pub fn color(&self) -> Option<[f32; 3]> {
         self.color
     }
@@ -374,6 +464,7 @@ impl Wallpaper {
         geometry: Geometry,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
+        self.paint_state = None;
         let uri = self.refresh(output, geometry)?;
         let loaded = self
             .loaded
@@ -381,7 +472,7 @@ impl Wallpaper {
             .find(|loaded| loaded.uri == uri && loaded.size == Some(output))?;
         let buffer = loaded.buffer.as_ref()?;
         let size = loaded.size?;
-        MemoryRenderBufferRenderElement::from_buffer(
+        let element = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             Point::<f64, Physical>::from((0.0, 0.0)),
             buffer,
@@ -390,7 +481,9 @@ impl Wallpaper {
             Some(size),
             Kind::Unspecified,
         )
-        .ok()
+        .ok()?;
+        self.paint_state = loaded.paint.clone();
+        Some(element)
     }
 
     /// GNOME's lock-screen background over a `w` x `h` output: the
@@ -525,25 +618,134 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        let identity = if settings.placement == tuna_shell_control::background::Placement::None {
+        let (identity, epoch, animation) = if settings.placement
+            == tuna_shell_control::background::Placement::None
+        {
             // GNOME NONE has no source file. In particular, an ignored lock
             // URI must not schedule a network/FUSE identity task or delay its
             // pure color/gradient. Empty URI also makes every downstream cache
             // and render worker independent of the unused file.
             uri.clear();
-            None
+            (None, None, None)
         } else {
             self.refresh_stage = Some("source-identity-pending");
-            self.poll_identity(&uri)?
+            let observation = self.poll_source(&uri)?;
+            let identity = observation.identity.clone();
+            let epoch = observation.timeline.as_ref().map(|_| {
+                format!(
+                    "{uri}\n{settings:?}\n{geometry:?}\n{}",
+                    observation.generation
+                )
+            });
+            let animation = if observation.xml
+                && settings.placement != tuna_shell_control::background::Placement::None
+            {
+                let timeline = observation.timeline.as_ref()?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs_f64();
+                let sample_key = format!(
+                    "{uri}\n{identity:?}\n{geometry:?}\n{}",
+                    observation.generation
+                );
+                let index = self
+                    .animation_samples
+                    .iter()
+                    .position(|s| s.key == sample_key);
+                let previous = index.map(|i| &self.animation_samples[i]);
+                let due = previous.is_none_or(|old| {
+                    old.sampled_mono.elapsed().as_secs_f64() >= old.sample.interval
+                        || ((now - old.sampled_wall) - old.sampled_mono.elapsed().as_secs_f64())
+                            .abs()
+                            > 1.0
+                });
+                if due {
+                    let logical = [
+                        (f64::from(geometry.physical[0]) / geometry.scale()).round() as i32,
+                        (f64::from(geometry.physical[1]) / geometry.scale()).round() as i32,
+                    ];
+                    let mut sample = timeline.sample(now, logical)?;
+                    if sample.to.is_none() {
+                        sample.progress = 0.0;
+                    }
+                    if let Some(index) = index {
+                        self.animation_samples.remove(index);
+                    }
+                    if self.animation_samples.len() >= MAX_WALLPAPER_SLOTS {
+                        self.animation_samples.remove(0);
+                    }
+                    self.animation_samples.push(AnimationSample {
+                        key: sample_key.clone(),
+                        sampled_wall: now,
+                        sampled_mono: std::time::Instant::now(),
+                        sample,
+                    });
+                }
+                let sample = self
+                    .animation_samples
+                    .iter()
+                    .find(|s| s.key == sample_key)?
+                    .sample
+                    .clone();
+                let references = observation
+                    .references
+                    .iter()
+                    .filter(|&(path, _)| *path == sample.from || sample.to.as_ref() == Some(path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Some((sample, references))
+            } else {
+                None
+            };
+            (identity, epoch, animation)
         };
-        // A missing picture still paints its configured color/gradient.
-        let key = format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}");
+        // XML epoch, selected keyframe identities and actual sampled progress
+        // participate in the cache key. Old results cannot satisfy a new key.
+        let key =
+            format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}\n{epoch:?}\n{animation:?}");
+
         if !self
             .loaded
             .iter()
             .any(|loaded| loaded.uri == key && loaded.size == Some(output))
         {
-            self.poll_decode(&key, &uri, output, settings, geometry, identity);
+            self.poll_decode(
+                &key,
+                Paint {
+                    epoch: epoch.clone(),
+                    uri,
+                    identity,
+                    animation,
+                },
+                output,
+                settings,
+                geometry,
+            );
+        }
+        if epoch.is_some()
+            && !self
+                .loaded
+                .iter()
+                .any(|loaded| loaded.uri == key && loaded.buffer.is_some())
+        {
+            // Retain a completed frame only within the exact same XML/settings/
+            // geometry/source epoch while its next transition step is pending.
+            // Source or calendar changes never reuse obsolete epoch pixels.
+            if let Some(previous) = self.loaded.iter().rev().find(|loaded| {
+                loaded.epoch == epoch
+                    && loaded.buffer.is_some()
+                    && loaded.paint.as_ref().is_some_and(|record| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|t| t.as_secs_f64())
+                            .unwrap_or(f64::INFINITY);
+                        let age = now - record["sample_wall"].as_f64().unwrap_or(f64::NEG_INFINITY);
+                        age >= 0.0 && age <= record["interval"].as_f64().unwrap_or(0.0) + 0.5
+                    })
+            }) {
+                return Some(previous.uri.clone());
+            }
         }
         self.refresh_stage = Some("request-accepted");
         Some(key)
@@ -701,10 +903,221 @@ impl FileIdentity {
         })
     }
     fn for_uri(uri: &str) -> Option<Self> {
-        let path = wallpaper_uri_to_path(uri)?.canonicalize().ok()?;
+        Self::for_path(&wallpaper_uri_to_path(uri)?)
+    }
+    fn for_path(path: &std::path::Path) -> Option<Self> {
+        let path = path.canonicalize().ok()?;
         Self::from_metadata(path.clone(), &std::fs::metadata(path).ok()?)
     }
 }
+/// This entire observer executes on a bounded worker, including timezone
+/// calendar conversion and every referenced image's arbitrary-path metadata.
+impl SourceObservation {
+    fn observe(uri: &str) -> Self {
+        let identity = FileIdentity::for_uri(uri);
+        let mut observed = Self {
+            identity: identity.clone(),
+            ..Self::default()
+        };
+        let Some(identity) = identity else {
+            return observed;
+        };
+        // GNOME slideshow descriptors use XML. Sniff their bounded content too,
+        // rather than treating an XML descriptor as an undecodable static image.
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&identity.path)
+        else {
+            return observed;
+        };
+        let mut prefix = [0; 256];
+        let count = file.read(&mut prefix).unwrap_or_default();
+        observed.xml = identity.path.extension().is_some_and(|e| e == "xml");
+        let markup = prefix[..count]
+            .iter()
+            .copied()
+            .find(|v| !v.is_ascii_whitespace())
+            == Some(b'<');
+        if !observed.xml && !markup {
+            return observed;
+        }
+        let Some(bytes) = read_identity(&identity, MAX_XML_BYTES as u64) else {
+            return observed;
+        };
+        // SVG is an image XML vocabulary, not a GNOME slideshow. A successful
+        // <background> parser is required before a non-.xml file becomes one.
+        let timeline = Timeline::parse(&bytes);
+        if timeline.is_some() {
+            observed.xml = true;
+        }
+        let Some(timeline) = timeline else {
+            return observed;
+        };
+        for path in timeline
+            .slides
+            .iter()
+            .flat_map(|s| s.from.iter().chain(s.to.iter()))
+            .map(|v| &v.path)
+        {
+            if !observed.references.iter().any(|(p, _)| p == path) {
+                if observed.references.len() >= 128 {
+                    return observed;
+                }
+                observed
+                    .references
+                    .push((path.clone(), FileIdentity::for_path(path)));
+            }
+        }
+        if FileIdentity::for_uri(uri) == observed.identity {
+            observed.generation = format!(
+                "{:?}\n{}\n{:?}",
+                observed.identity,
+                timeline.start.to_bits(),
+                observed.references
+            );
+            observed.timeline = Some(timeline);
+        }
+        observed
+    }
+}
+fn read_identity(expected: &FileIdentity, limit: u64) -> Option<Vec<u8>> {
+    if expected.bytes > limit {
+        return None;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&expected.path)
+        .ok()?;
+    if FileIdentity::from_metadata(expected.path.clone(), &file.metadata().ok()?)
+        != Some(expected.clone())
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.by_ref().take(limit + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 == expected.bytes
+        && FileIdentity::from_metadata(expected.path.clone(), &file.metadata().ok()?)
+            == Some(expected.clone()))
+    .then_some(bytes)
+}
+fn load_animation_wallpaper(
+    uri: &str,
+    identity: Option<FileIdentity>,
+    sample: Sample,
+    references: Vec<(PathBuf, Option<FileIdentity>)>,
+    settings: PictureSettings,
+    geometry: Geometry,
+    caches: &BackgroundCaches,
+) -> Option<Vec<u8>> {
+    let unchanged = || {
+        FileIdentity::for_uri(uri) == identity
+            && references
+                .iter()
+                .all(|(path, id)| FileIdentity::for_path(path) == *id)
+    };
+    if !unchanged() {
+        return None;
+    }
+    let decode = |path: &PathBuf| -> Option<std::sync::Arc<image::RgbaImage>> {
+        let identity = references.iter().find(|(p, _)| p == path)?.1.as_ref()?;
+        if let Some(found) = caches
+            .images
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(key, _)| key == identity)
+            .map(|(_, image)| image.clone())
+        {
+            return Some(found);
+        }
+        let image = std::sync::Arc::new(
+            tuna_wallpaper::decode(&read_identity(identity, 64 * 1024 * 1024)?)?.to_rgba8(),
+        );
+        if FileIdentity::for_path(path) != Some(identity.clone()) {
+            return None;
+        }
+        let mut slots = caches.images.lock().ok()?;
+        let mut bytes = slots
+            .iter()
+            .map(|(_, image)| image.as_raw().len())
+            .sum::<usize>();
+        if image.as_raw().len() <= 64 * 1024 * 1024 {
+            while !slots.is_empty()
+                && (slots.len() >= MAX_WALLPAPER_SLOTS
+                    || bytes + image.as_raw().len() > 64 * 1024 * 1024)
+            {
+                bytes -= slots.remove(0).1.as_raw().len();
+            }
+            slots.push((identity.clone(), image.clone()));
+        }
+        Some(image)
+    };
+    let from = decode(&sample.from);
+    let to = sample.to.as_ref().and_then(decode);
+    let progress = if sample.to.is_some() {
+        sample.progress
+    } else {
+        0.0
+    };
+    let placed = |path: &PathBuf, image: Option<&image::RgbaImage>| {
+        let image = image?;
+        let identity = references.iter().find(|(p, _)| p == path)?.1.clone()?;
+        let key = (identity, settings.placement, geometry);
+        if let Some(found) = caches
+            .placed
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, image)| image.clone())
+        {
+            return Some(found);
+        }
+        let image = std::sync::Arc::new(tuna_wallpaper::background::place(
+            image,
+            settings.placement,
+            geometry,
+        )?);
+        let mut slots = caches.placed.lock().ok()?;
+        let mut bytes = slots.iter().map(|(_, image)| image.bytes()).sum::<usize>();
+        while !slots.is_empty()
+            && (bytes + image.bytes() > 64 * 1024 * 1024 || slots.len() >= MAX_WALLPAPER_SLOTS)
+        {
+            bytes -= slots.remove(0).1.bytes();
+        }
+        slots.push((key, image.clone()));
+        Some(image)
+    };
+    let placed_from = placed(&sample.from, from.as_deref());
+    let placed_to = sample
+        .to
+        .as_ref()
+        .and_then(|path| placed(path, to.as_deref()));
+    let pixels =
+        if (from.is_none() || placed_from.is_some()) && (to.is_none() || placed_to.is_some()) {
+            tuna_wallpaper::background::render_placed_blend(
+                placed_from.as_deref(),
+                placed_to.as_deref(),
+                progress,
+                settings,
+                geometry,
+            )
+        } else {
+            // An output larger than the placement-cache byte budget still renders
+            // faithfully on its bounded worker, without keeping large float planes.
+            tuna_wallpaper::background::render_blend(
+                from.as_deref(),
+                to.as_deref(),
+                progress,
+                settings,
+                geometry,
+            )
+        }?;
+    unchanged().then_some(pixels)
+}
+
 fn load_static_wallpaper(
     uri: &str,
     settings: PictureSettings,
@@ -1341,6 +1754,74 @@ mod tests {
             "replacement inode must invalidate cached pixels even for same dimensions/content"
         );
     }
+    #[test]
+    fn xml_reference_replacement_changes_epoch_and_rejects_stale_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let picture = dir.path().join("frame.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([240, 0, 0, 255]))
+            .save(&picture)
+            .unwrap();
+        let xml = dir.path().join("timeline.xml");
+        let document = format!(
+            "<background><static><duration>4</duration><file>{}</file></static></background>",
+            picture.display()
+        );
+        std::fs::write(&xml, &document).unwrap();
+        let uri = format!("file://{}", xml.display());
+        let original = SourceObservation::observe(&uri);
+        let sample = original
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sample(100.0, [8, 8])
+            .unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 240, 255]))
+            .save(&picture)
+            .unwrap();
+        let changed = SourceObservation::observe(&uri);
+        assert_eq!(original.identity, changed.identity);
+        assert_ne!(
+            original.generation, changed.generation,
+            "same XML URI must observe changed referenced-image identity"
+        );
+        assert!(
+            load_animation_wallpaper(
+                &uri,
+                original.identity.clone(),
+                sample.clone(),
+                original.references.clone(),
+                PictureSettings::default(),
+                test_geometry(),
+                &BackgroundCaches::default()
+            )
+            .is_none(),
+            "stale source worker cannot publish old image identity"
+        );
+        std::fs::write(&xml, document.replace("<duration>4", "<duration>8")).unwrap();
+        assert!(
+            load_animation_wallpaper(
+                &uri,
+                changed.identity,
+                sample,
+                changed.references,
+                PictureSettings::default(),
+                test_geometry(),
+                &BackgroundCaches::default()
+            )
+            .is_none(),
+            "stale XML worker cannot publish after descriptor replacement"
+        );
+        let svg = dir.path().join("image.svg");
+        std::fs::write(&svg, "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
+        assert!(
+            !SourceObservation::observe(&format!("file://{}", svg.display())).xml,
+            "SVG must not claim slideshow support"
+        );
+        std::fs::write(&xml, "<!DOCTYPE background [<!ENTITY a 'x'>]><background/>").unwrap();
+        let invalid = SourceObservation::observe(&uri);
+        assert!(invalid.xml && invalid.timeline.is_none());
+    }
+
     #[test]
     fn stalled_identity_observation_does_not_block_frames_or_spawn_unbounded_jobs() {
         let mut wallpaper = Wallpaper::new();

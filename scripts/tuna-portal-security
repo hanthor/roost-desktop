@@ -25,3 +25,6 @@ podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/rep
 
 mkdir -p "$out/stock-backgrounds"
 podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/repo:ro" --volume "$candidate:/candidate:ro" --volume "$out/stock-backgrounds:/out" localhost/tuna-portal-reference /repo/tests/portal-reference/backgrounds-run.sh
+
+mkdir -p "$out/stock-slideshow"
+podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/repo:ro" --volume "$candidate:/candidate:ro" --volume "$out/stock-slideshow:/out" localhost/tuna-portal-reference /repo/tests/portal-reference/slideshow-run.sh

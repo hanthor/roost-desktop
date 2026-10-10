@@ -1556,6 +1556,7 @@ impl Runtime {
             "overview_search": self.overview_search,
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
+            "background_paint": if self.is_locked() { None } else { self.wallpaper.paint_state() },
             "overview_open": overview_open,
             "animations_enabled": self.input_settings.motion.animations_enabled(),
             "mouse_left_handed": self.input_settings.mouse_left_handed,
