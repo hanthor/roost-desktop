@@ -1173,7 +1173,7 @@ mod tests {
         let mut wallpaper = Wallpaper::new();
         let output = (64, 48).into();
         let mut pixels = vec![0u8; 64 * 48 * 4];
-        for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             pixel.copy_from_slice(&[(index % 256) as u8, 40, 120, 255]);
         }
         let pixels: std::sync::Arc<[u8]> = pixels.into();
@@ -1274,7 +1274,7 @@ mod tests {
             ),
         ] {
             let actual: std::collections::HashSet<_> =
-                picker_card_sizes((physical[0] as i32, physical[1] as i32).into(), scale)
+                picker_card_sizes((physical[0], physical[1]).into(), scale)
                     .into_iter()
                     .map(|size| (size.w, size.h))
                     .collect();
