@@ -33,6 +33,7 @@ state = art / "state.json"
 clock = art / "clock"
 command = art / "command.json"
 clock.write_text("0\n")
+(art / "assertions.txt").unlink(missing_ok=True)
 state.unlink(missing_ok=True)
 command.unlink(missing_ok=True)
 env = dict(os.environ, DISPLAY=a.display, XDG_RUNTIME_DIR=str(runtime),
@@ -93,6 +94,11 @@ def action(name, generation):
     temp = art / "command.tmp"
     temp.write_text(json.dumps(dict(action=name, generation=generation)))
     temp.replace(command)
+def require_owned_cleanup(cleanup):
+    if not cleanup["runtime_removed"] or not cleanup["accessibility_processes_stopped"]:
+        raise AssertionError("owned proof session cleanup failed")
+
+success = False
 accessibility = None
 try:
     # Private session buses alone do not isolate the fixed AT-SPI runtime socket.
@@ -199,8 +205,21 @@ try:
     third.wait(timeout=10)
     wait(lambda d:not d["windows"] and not d["window_lifecycle"]["destroying"] and d["window_lifecycle"]["retained_destroy_bytes"] == 0,"off-destroy")
     assert compositor.poll() is None, "compositor crashed after destroyed surface"
-    (art / "assertions.txt").write_text("WL-NORMAL-MAP pass 150ms scale/fade rendered\nWL-DIALOG pass 100ms map/destroy native transient\nWL-DESTROY pass retained frame after client exit; fade and cleanup\nWL-REDUCED pass scale disabled, normal fades retained\nWL-OFF pass immediate map/destroy, no retained content\n")
-    print(f"window lifecycle proof passed: {art}")
+    subprocess.run(["gsettings","set","org.gnome.desktop.interface","enable-animations","true"],env=env,check=True)
+    subprocess.run(["gsettings","set","org.gnome.desktop.a11y.interface","reduced-motion","no-preference"],env=env,check=True)
+    wait(lambda d:d["motion_policy"] == "full","restored-motion")
+    command.unlink(missing_ok=True)
+    fourth = spawn(["/usr/bin/python3",str(root / "scripts/lib/tuna-window-lifecycle-client.py")],"interrupted-client",{"WAYLAND_DISPLAY":"lifecycle-proof","GDK_BACKEND":"wayland"})
+    early = wait(lambda d:len(d["window_lifecycle"]["opening"]) == 1,"interrupted-map-start")
+    early_id = early["window_lifecycle"]["opening"][0]["window"]
+    move(875)
+    wait(lambda d:d["window_lifecycle"]["opening"][0]["elapsed_ms"] == 75,"interrupted-map-half")
+    action("close",6)
+    fourth.wait(timeout=10)
+    wait(lambda d:not d["windows"] and not d["window_lifecycle"]["destroying"] and any(e["window"] == early_id and e["outcome"] == "interrupted-map" for e in d["window_lifecycle"]["history"]),"interrupted-close")
+    closed = screenshot("07-interrupted-close")
+    assert closed.getpixel(point) == baseline.getpixel(point), "interrupted map left an opaque ghost"
+    success = True
 finally:
     owned_accessibility_pids = []
     if accessibility:
@@ -248,3 +267,8 @@ finally:
     (art / "manifest.json").write_text(json.dumps(manifest,indent=2))
     for log in logs:
         log.close()
+
+require_owned_cleanup(manifest["owned_cleanup"])
+if success:
+    (art / "assertions.txt").write_text("WL-NORMAL-MAP pass 150ms scale/fade rendered\nWL-DIALOG pass 100ms map/destroy native transient\nWL-DESTROY pass retained frame after client exit; fade and cleanup\nWL-REDUCED pass scale disabled, normal fades retained\nWL-OFF pass immediate map/destroy, no retained content\nWL-INTERRUPTED pass exit during map skips unsafe raw snapshot\nWL-CLEANUP pass private runtime and accessibility processes removed\n")
+    print(f"window lifecycle proof passed: {art}")

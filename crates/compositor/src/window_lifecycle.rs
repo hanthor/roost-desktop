@@ -102,12 +102,53 @@ pub fn rect(geometry: Rect, frame: Frame) -> RectF {
         (w * frame.scale.0, h * frame.scale.1).into(),
     )
 }
+/// Lifecycle snapshots do not carry workspace transforms. Suppress them during
+/// both keyboard slides and gestures rather than leaking content across spaces.
+pub fn effects_allowed(overview: bool, gesture: bool, slide: bool, locked: bool) -> bool {
+    !overview && !gesture && !slide && !locked
+}
+fn interrupted_close(mapping: bool, resizing: bool) -> Option<&'static str> {
+    if mapping {
+        Some("interrupted-map")
+    } else if resizing {
+        Some("interrupted-size-change")
+    } else {
+        None
+    }
+}
+fn snapshot_allowed(count: usize, retained: u64, pixels: u64) -> bool {
+    count < 32 && retained.saturating_add(pixels) <= 16 * 1024 * 1024
+}
+fn successors(stack: &[u64], visible: &HashSet<u64>) -> Vec<Option<u64>> {
+    let mut result = vec![None; stack.len()];
+    let mut next = None;
+    for (rank, id) in stack.iter().enumerate().rev() {
+        result[rank] = next;
+        if visible.contains(id) {
+            next = Some(*id);
+        }
+    }
+    result
+}
+fn retire<T>(items: &mut Vec<T>, expired: impl Fn(&T) -> bool) -> Vec<T> {
+    let mut removed = Vec::new();
+    let mut active = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if expired(&item) {
+            removed.push(item);
+        } else {
+            active.push(item);
+        }
+    }
+    *items = active;
+    removed
+}
 struct Cached {
     geometry: Rect,
     scale: f64,
     kind: Kind,
     parent: Option<u64>,
-    above: Vec<u64>,
+    resizing: bool,
     order: usize,
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
 }
@@ -129,6 +170,7 @@ pub struct Ghost {
 pub struct Lifecycle {
     known: HashSet<u64>,
     cache: HashMap<u64, Cached>,
+    stack: Vec<u64>,
     opening: HashMap<u64, Running>,
     ghosts: Vec<Ghost>,
     history: VecDeque<serde_json::Value>,
@@ -136,6 +178,13 @@ pub struct Lifecycle {
     policy: MotionPolicy,
 }
 impl Lifecycle {
+    fn suspend(&mut self, ids: HashSet<u64>) {
+        self.opening.clear();
+        self.ghosts.clear();
+        self.cache.clear();
+        self.stack.clear();
+        self.known = ids;
+    }
     pub fn running(&self) -> bool {
         !self.opening.is_empty() || !self.ghosts.is_empty()
     }
@@ -305,7 +354,7 @@ pub fn step_frame(
                     scale,
                     kind,
                     parent: manager.transient_parent(*id),
-                    above: entries[index + 1..].iter().map(|e| e.0).collect(),
+                    resizing: manager.size_changes().frame(*id).is_some(),
                     order: index,
                     elements,
                 },
@@ -316,12 +365,19 @@ pub fn step_frame(
     life.now = now;
     life.policy = policy;
     if !allowed || !policy.allows_fades() {
-        life.opening.clear();
-        life.ghosts.clear();
-        life.cache.clear();
-        life.known = ids;
+        life.suspend(ids);
         return;
     }
+    // Release expired textures before admitting new snapshots to the budget.
+    let finished = retire(&mut life.ghosts, |g| {
+        now.saturating_sub(g.running.start) >= duration(g.running.kind, policy)
+            || g.parent.is_some_and(|p| !ids.contains(&p))
+    });
+    for g in finished {
+        life.record(g.id, "destroy", g.running.kind, "completed");
+    }
+    let visible_ids = entries.iter().map(|e| e.0).collect();
+    let next = successors(&life.stack, &visible_ids);
     let gone: Vec<_> = life
         .cache
         .keys()
@@ -330,22 +386,24 @@ pub fn step_frame(
         .collect();
     for id in gone {
         let old = life.cache.remove(&id).expect("cached id");
-        life.opening.remove(&id);
+        let mapping = life.opening.remove(&id).is_some();
+        // Raw cached elements exclude active map/resize transforms. A safe
+        // immediate close is preferable to an opaque full-size frozen jump.
+        if let Some(reason) = interrupted_close(mapping, old.resizing) {
+            life.record(id, "destroy", old.kind, reason);
+            continue;
+        }
         if old.parent.is_some_and(|parent| !ids.contains(&parent)) {
             continue;
         }
         let pixels = ((f64::from(old.geometry.size.w) * old.scale).round() as u64)
             .saturating_mul((f64::from(old.geometry.size.h) * old.scale).round() as u64);
         // Bound retained GPU copies to 64 MiB and 32 simultaneous effects.
-        if life.ghosts.len() >= 32
-            || life
-                .ghosts
-                .iter()
-                .map(|g| g.pixels)
-                .sum::<u64>()
-                .saturating_add(pixels)
-                > 16 * 1024 * 1024
-        {
+        if !snapshot_allowed(
+            life.ghosts.len(),
+            life.ghosts.iter().map(|g| g.pixels).sum(),
+            pixels,
+        ) {
             life.record(id, "destroy", old.kind, "snapshot-budget");
             continue;
         }
@@ -353,7 +411,7 @@ pub fn step_frame(
             life.record(id, "destroy", old.kind, "started");
             life.ghosts.push(Ghost {
                 id,
-                before: old.above.iter().copied().find(|id| ids.contains(id)),
+                before: next.get(old.order).copied().flatten(),
                 order: old.order,
                 parent: old.parent,
                 geometry: old.geometry,
@@ -384,22 +442,6 @@ pub fn step_frame(
         life.opening.remove(&id);
         life.record(id, "map", kind, "completed");
     }
-    let finished: Vec<_> = life
-        .ghosts
-        .iter()
-        .filter(|g| {
-            now.saturating_sub(g.running.start) >= duration(g.running.kind, policy)
-                || g.parent.is_some_and(|p| !ids.contains(&p))
-        })
-        .map(|g| (g.id, g.running.kind))
-        .collect();
-    for (id, kind) in finished {
-        life.record(id, "destroy", kind, "completed");
-    }
-    life.ghosts.retain(|g| {
-        now.saturating_sub(g.running.start) < duration(g.running.kind, policy)
-            && g.parent.is_none_or(|p| ids.contains(&p))
-    });
     let visible: HashSet<_> = shown.iter().map(|e| e.0).collect();
     life.cache.retain(|id, _| visible.contains(id));
     for (id, cached) in shown {
@@ -415,6 +457,7 @@ pub fn step_frame(
         }
         life.cache.insert(id, cached);
     }
+    life.stack = entries.iter().map(|e| e.0).collect();
     // A first commit on a hidden workspace is a map too: showing that
     // workspace later must not replay a fresh-window effect.
     life.known.extend(buffered);
@@ -455,6 +498,51 @@ mod tests {
     use tuna_shell_control::motion::MotionLevel;
     fn policy(level: MotionLevel) -> MotionPolicy {
         MotionPolicy::new(level, 1.0)
+    }
+    #[test]
+    fn keyboard_workspace_slide_suppresses_lifecycle_and_resume_does_not_replay_map() {
+        assert!(effects_allowed(false, false, false, false));
+        assert!(!effects_allowed(false, false, true, false));
+        let mut life = Lifecycle::default();
+        life.opening.insert(
+            7,
+            Running {
+                kind: Kind::Normal,
+                start: Duration::ZERO,
+            },
+        );
+        life.stack.push(7);
+        life.suspend(HashSet::from([7]));
+        assert!(!life.running());
+        assert!(life.stack.is_empty());
+        assert!(!life.known.insert(7));
+    }
+    #[test]
+    fn interrupted_map_and_size_change_close_skip_raw_snapshot() {
+        assert_eq!(interrupted_close(true, false), Some("interrupted-map"));
+        assert_eq!(
+            interrupted_close(false, true),
+            Some("interrupted-size-change")
+        );
+        assert_eq!(interrupted_close(false, false), None);
+    }
+    #[test]
+    fn expired_ghosts_release_budget_before_new_close() {
+        let mut retained = vec![Duration::ZERO; 32];
+        let removed = retire(&mut retained, |start| {
+            Duration::from_millis(150).saturating_sub(*start) >= Duration::from_millis(150)
+        });
+        assert_eq!(removed.len(), 32);
+        assert!(snapshot_allowed(retained.len(), 0, 1024));
+        assert!(!snapshot_allowed(32, 0, 1));
+        assert!(!snapshot_allowed(0, u64::MAX, 1));
+    }
+    #[test]
+    fn shared_stack_successors_preserve_order_without_hidden_windows() {
+        assert_eq!(
+            successors(&[1, 2, 3, 4], &HashSet::from([1, 4])),
+            vec![Some(4), Some(4), Some(4), None]
+        );
     }
     #[test]
     fn gnome51_normal_map_pivot_and_exponential_curve() {

@@ -3411,7 +3411,12 @@ impl Runtime {
         self.step_workspace_slide();
         self.step_size_changes();
         let now = self.animation_clock.now();
-        let allowed = !self.control.overview_open() && self.shell_swipe.is_none() && !locked;
+        let allowed = crate::window_lifecycle::effects_allowed(
+            self.control.overview_open(),
+            self.shell_swipe.is_some(),
+            self.manager.workspace_slide().running(),
+            locked,
+        );
         let renderer = match &mut self.backend {
             Backend::Winit(backend) => backend.renderer(),
             #[cfg(feature = "drm")]

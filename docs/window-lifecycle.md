@@ -77,3 +77,7 @@ capture, all X11 role types, reduced-motion dialog runtime cases, simultaneous c
 ordering, hardware texture import paths, or the v1 performance targets. Those
 remain qualification work; the parity ledger must not mark the whole row
 passing solely from these unit tests.
+
+### Review safety boundaries
+
+Workspace slides (including keyboard switches) clear and suppress lifecycle effects because retained textures do not include the workspace transform. Closing during an unfinished map or size change skips the destroy effect and records `interrupted-map` or `interrupted-size-change`; this prevents an opaque full-size snapshot jump. These are explicit fidelity gaps. One shared stack per frame preserves successor ordering without per-window stack copies. Expired textures leave the budget before new closes are admitted. Proof success is recorded only after owned session cleanup succeeds.
