@@ -796,8 +796,10 @@ impl ScreenshotUi {
         window.connect_close_request(move |_| {
             if let Some(ui) = weak.upgrade() {
                 ui.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
             }
-            glib::Propagation::Stop
         });
         // Also cover direct GTK destruction: a destroyed window must never
         // remain in the slot and be reused by a later screenshot request.
