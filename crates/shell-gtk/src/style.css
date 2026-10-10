@@ -4,6 +4,9 @@
 
 window.tuna-panel {
   background-color: #000000;
+  /* GNOME's #panel eases between black and see-through over 250 ms
+     (ease-out-quad) as the overview opens and closes. */
+  transition: background-color 250ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 /* In the overview the bar is see-through (#panel:overview). */
@@ -124,12 +127,20 @@ popover.tuna-shell-popover > contents {
 popover.tuna-qs > contents {
   padding: 18px;
   border-radius: 36px;
+  /* GNOME dims and undims the panel under a toggle menu over 400 ms
+     (quickSettings.js _setDimmed, ease-out-quad). */
+  transition: background-color 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
+    border-color 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 popover.tuna-qs.dimmed > contents {
   /* GNOME dims the panel to 60% brightness under an open toggle menu. */
   background-color: #202023;
   border-color: #28282b;
+}
+
+.tuna-qs .qs-dimmable {
+  transition: filter 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .tuna-qs.dimmed .qs-dimmable {

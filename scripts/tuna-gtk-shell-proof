@@ -129,6 +129,10 @@
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
 #                  the right one unlocks through PAM (pam_wrapper)
+#   G-TRANSIENT-OFF with animations off the OSD, banners and panel menus
+#                  show at once; Reduced Motion keeps the fade (#501)
+#   G-TRANSIENT-SETTLE the transient animations ran over GNOME 51's
+#                  durations and settled (#501)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
@@ -635,6 +639,10 @@ TUNA_IBUS_DEBUG=1
 export TUNA_IBUS TUNA_IBUS_DEBUG
 TUNA_GRID_TRACE=1
 export TUNA_GRID_TRACE
+# The shell logs each transient animation (#501): instant, or when it
+# settled (G-TRANSIENT-*).
+TUNA_TRANSIENT_TRACE=1
+export TUNA_TRANSIENT_TRACE
 TUNA_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export TUNA_PROOF_SWIPE_INPUT
 # G-ANIMATION-CLOCK drives compositor animation time through this file;
@@ -4309,6 +4317,8 @@ until [ "$(cat "$BACKLIGHT/brightness")" != "$before" ] || [ "$(date +%s)" -gt "
 after="$(cat "$BACKLIGHT/brightness")"
 [ "$after" -gt "$before" ] ||
     fail G-KEY-BRIGHTNESS "the brightness key left the backlight at $after (was $before)"
+# Let the OSD's 100 ms fade-in settle before the frame.
+sleep 0.3
 scrot "$ARTIFACTS/24c-brightness-osd.png" >/dev/null
 pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth through logind"
 # Per-monitor keys must identify the pointer's connector, even with a
@@ -4377,6 +4387,39 @@ jq -e '.[] | select(.showing and .focused and .name == "Close")' "$ARTIFACTS/a11
 xdotool key Escape
 gsettings reset org.gnome.shell.keybindings focus-active-notification
 pass G-NOTIFICATION-FOCUS-KEY "the rebound key focuses the active banner; Escape restores client input"
+
+# With animations off the transient surfaces (#501) appear and go at
+# once: the OSD, a banner and a panel menu each log "instant".
+transient_off_start=$(($(wc -l < "$LOG") + 1))
+gsettings set org.gnome.desktop.interface enable-animations false
+sleep 1
+xdotool key XF86MonBrightnessUp
+notify "Instant Banner" "Animations off" || fail G-TRANSIENT-OFF "Notify failed"
+open_calendar
+xdotool key Escape
+sleep 0.5
+sed -n "${transient_off_start},\$p" "$LOG" > "$ARTIFACTS/transient-off.log"
+for name in osd banner menu; do
+    grep -q "tuna-shell-gtk: transient $name instant" "$ARTIFACTS/transient-off.log" ||
+        fail G-TRANSIENT-OFF "the $name animation still ran with animations off"
+    if grep -q "tuna-shell-gtk: transient $name settled" "$ARTIFACTS/transient-off.log"; then
+        fail G-TRANSIENT-OFF "the $name animation played with animations off"
+    fi
+done
+gsettings set org.gnome.desktop.interface enable-animations true
+sleep 1
+# Reduced Motion keeps the fades (GNOME 51): the OSD still fades in.
+transient_reduced_start=$(($(wc -l < "$LOG") + 1))
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+sleep 1
+xdotool key XF86MonBrightnessUp
+sleep 0.5
+sed -n "${transient_reduced_start},\$p" "$LOG" > "$ARTIFACTS/transient-reduced.log"
+grep -q "tuna-shell-gtk: transient osd settled after [0-9]* ms of 100 ms" "$ARTIFACTS/transient-reduced.log" ||
+    fail G-TRANSIENT-OFF "Reduced Motion dropped the OSD's fade"
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+sleep 1
+pass G-TRANSIENT-OFF "with animations off the OSD, banners and panel menus show at once; Reduced Motion keeps the fade"
 
 # GNOME Shell as the polkit agent: polkit (the Authority stub, back on
 # the bus) asks the agent to authenticate; a wrong password says so and
@@ -4753,6 +4796,16 @@ for scenario in allow remembered-allow deny remembered-deny unknown; do
 done
 jq -e '."tuna-consent-allow.desktop" == ["GRANTED"] and ."tuna-consent-deny.desktop" == ["DENIED"] and (has("tuna-consent-unknown.desktop") | not)' "$ARTIFACTS/shortcut-permissions.json" >/dev/null || fail G-SHORTCUT-CONSENT "PermissionStore did not remember exactly the known apps"
 pass G-SHORTCUT-CONSENT "live requests require Allow, Deny stays inactive, known app decisions persist without prompting, unknown apps are not remembered, Super+Escape restores input"
+
+# Every transient animation (#501) that ran with animations on played
+# for its full GNOME duration and settled: the OSD and its level, the
+# banners, the panel menus, the quick-settings submenus and the modals.
+for spec in osd:100 osd-level:100 banner:200 menu:150 submenu:400 modal:100; do
+    name="${spec%%:*}"
+    grep -q "tuna-shell-gtk: transient $name settled after [0-9]* ms of ${spec#*:} ms" "$LOG" ||
+        fail G-TRANSIENT-SETTLE "no $name animation settled over ${spec#*:} ms"
+done
+pass G-TRANSIENT-SETTLE "OSD, banners, panel menus, quick-settings submenus and modals animate over GNOME's durations and settle"
 
 "$ROOT/scripts/tuna-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"

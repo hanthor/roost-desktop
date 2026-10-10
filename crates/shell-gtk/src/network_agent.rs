@@ -130,6 +130,8 @@ struct Pending {
 /// The agent owns one modal request; cancellation also invalidates async work.
 pub struct NetworkAgent {
     window: gtk::Window,
+    /// The modal fade in and out (`ModalDialog`, 100 ms).
+    fade: crate::transient::ModalFade,
     title: gtk::Label,
     message: gtk::Label,
     content: gtk::Box,
@@ -186,6 +188,7 @@ impl NetworkAgent {
         card.append(&buttons);
         window.set_child(Some(&card));
         let agent = Rc::new(Self {
+            fade: crate::transient::ModalFade::new(&window),
             window,
             title,
             message,
@@ -370,7 +373,7 @@ impl NetworkAgent {
         }
         *self.entries.borrow_mut() = entries;
         self.validate();
-        self.window.present();
+        self.fade.present();
         if let Some(entry) = self.entries.borrow().iter().find(|e| e.is_editable()) {
             entry.grab_focus();
         }
@@ -406,7 +409,7 @@ impl NetworkAgent {
         }
     }
     fn clear(&self) {
-        self.window.set_visible(false);
+        self.fade.hide();
         for entry in self.entries.borrow().iter() {
             entry.set_text("");
         }

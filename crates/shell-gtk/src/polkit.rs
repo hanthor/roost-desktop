@@ -149,6 +149,8 @@ struct Request {
 
 pub struct PolkitAgent {
     window: gtk::Window,
+    /// The modal fade in and out (`ModalDialog`, 100 ms).
+    fade: crate::transient::ModalFade,
     message: gtk::Label,
     user_label: gtk::Label,
     entry: gtk::PasswordEntry,
@@ -239,6 +241,7 @@ impl PolkitAgent {
         window.set_child(Some(&card));
 
         let agent = Rc::new(Self {
+            fade: crate::transient::ModalFade::new(&window),
             window,
             message,
             user_label,
@@ -340,7 +343,7 @@ impl PolkitAgent {
             user: login,
             helper: None,
         });
-        self.window.present();
+        self.fade.present();
         self.entry.grab_focus();
         self.start_helper();
     }
@@ -464,7 +467,7 @@ impl PolkitAgent {
 
     /// End the request: authorized, or cancelled by the user.
     fn finish(&self, authorized: bool) {
-        self.window.set_visible(false);
+        self.fade.hide();
         self.entry.set_text("");
         self.awaiting.set(false);
         let Some(request) = self.request.borrow_mut().take() else {

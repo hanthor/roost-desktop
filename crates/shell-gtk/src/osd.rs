@@ -14,6 +14,8 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::transient;
+
 /// GNOME's HIDE_TIMEOUT.
 const HIDE_AFTER: Duration = Duration::from_millis(1500);
 /// `.osd-window { margin-bottom: 4em }` at the 14.666px shell font.
@@ -40,6 +42,10 @@ pub struct OsdUi {
     level: gtk::DrawingArea,
     value: Rc<Cell<(f64, f64)>>,
     hide: RefCell<Option<glib::SourceId>>,
+    /// The window's fade in and out.
+    fade: transient::Player,
+    /// The level bar easing to a new value.
+    level_anim: transient::Player,
 }
 
 impl OsdUi {
@@ -95,6 +101,8 @@ impl OsdUi {
             level,
             value,
             hide: RefCell::new(None),
+            fade: transient::Player::new("osd"),
+            level_anim: transient::Player::new("osd-level"),
         })
     }
 
@@ -113,7 +121,12 @@ impl OsdUi {
         self.label.set_label(request.label.as_deref().unwrap_or(""));
         self.level.set_visible(request.level.is_some());
         let max = request.max_level.filter(|m| *m > 0.0).unwrap_or(1.0);
-        self.value.set((request.level.unwrap_or(0.0), max));
+        let level = request.level.unwrap_or(0.0);
+        // A showing OSD eases the bar to the new level (`setLevel`); a
+        // hidden one jumps there.
+        let shown = self.window.is_visible() && self.window.opacity() > 0.0;
+        let from = if shown { self.value.get().0 } else { level };
+        self.value.set((from, max));
         // The first visible row carries no bottom margin (St's
         // :first-child on `.level`).
         if request.label.is_some() {
@@ -125,7 +138,44 @@ impl OsdUi {
         // Shrink to the new content: a layer surface keeps its last size
         // unless asked for its natural one.
         self.window.set_default_size(1, 1);
+        // Fade in from wherever a fade-out left it.
+        let opacity = if self.window.is_visible() {
+            self.window.opacity()
+        } else {
+            0.0
+        };
+        self.window.set_opacity(opacity);
         self.window.present();
+        if opacity < 1.0 {
+            let window = self.window.downgrade();
+            self.fade.play(
+                &self.window,
+                transient::OSD_MS,
+                move |t| {
+                    if let Some(w) = window.upgrade() {
+                        w.set_opacity(transient::fade(opacity, 1.0, t));
+                    }
+                },
+                || {},
+            );
+        } else {
+            // Cancel a fade-out that has not moved yet.
+            self.fade.stop();
+        }
+        {
+            let (value, area) = (self.value.clone(), self.level.downgrade());
+            self.level_anim.play(
+                &self.level,
+                transient::OSD_MS,
+                move |t| {
+                    value.set((transient::fade(from, level, t), max));
+                    if let Some(area) = area.upgrade() {
+                        area.queue_draw();
+                    }
+                },
+                || {},
+            );
+        }
         if let Some(id) = self.hide.borrow_mut().take() {
             id.remove();
         }
@@ -133,10 +183,30 @@ impl OsdUi {
         let id = glib::timeout_add_local_once(HIDE_AFTER, move || {
             if let Some(ui) = weak.upgrade() {
                 ui.hide.borrow_mut().take();
-                ui.window.set_visible(false);
+                ui.fade_out();
             }
         });
         *self.hide.borrow_mut() = Some(id);
+    }
+
+    /// GNOME's `_hide`: fade out, then hide.
+    fn fade_out(&self) {
+        let from = self.window.opacity();
+        let (step, done) = (self.window.downgrade(), self.window.downgrade());
+        self.fade.play(
+            &self.window,
+            transient::OSD_MS,
+            move |t| {
+                if let Some(w) = step.upgrade() {
+                    w.set_opacity(transient::fade(from, 0.0, t));
+                }
+            },
+            move || {
+                if let Some(w) = done.upgrade() {
+                    w.set_visible(false);
+                }
+            },
+        );
     }
 }
 

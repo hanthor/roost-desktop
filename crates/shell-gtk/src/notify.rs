@@ -161,6 +161,9 @@ pub struct NotifyUi {
     bus: RefCell<NotificationBus>,
     banner_window: gtk::ApplicationWindow,
     banner_box: gtk::Box,
+    /// Drops banners in and slides them out (`messageTray.js`).
+    banner_bin: crate::transient::MotionBin,
+    banner_motion: crate::transient::Player,
     /// The calendar popover's left pane.
     pane: gtk::Box,
     list: gtk::Box,
@@ -302,7 +305,8 @@ impl NotifyUi {
         banner_window.add_controller(keys);
         banner_window.set_title(Some("Notifications"));
         let banner_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        banner_window.set_child(Some(&banner_box));
+        let banner_bin = crate::transient::MotionBin::new(&banner_box);
+        banner_window.set_child(Some(&banner_bin));
 
         // Calendar pane, GNOME 51's CalendarMessageList: the placeholder
         // overlaid on the list, and a controls row holding only Clear (Do
@@ -349,6 +353,8 @@ impl NotifyUi {
             bus: RefCell::new(bus),
             banner_window,
             banner_box,
+            banner_bin,
+            banner_motion: crate::transient::Player::new("banner"),
             pane,
             list,
             empty,
@@ -486,9 +492,14 @@ impl NotifyUi {
         if *self.shown.borrow() == now {
             return;
         }
-        // Banners.
-        while let Some(child) = self.banner_box.first_child() {
-            self.banner_box.remove(&child);
+        let before = std::mem::take(&mut *self.shown.borrow_mut());
+        // Banners. The last ones stay up while they slide away (and are
+        // cleared once they have).
+        let leaving = now.banners.is_empty() && !before.banners.is_empty();
+        if !now.banners.is_empty() {
+            while let Some(child) = self.banner_box.first_child() {
+                self.banner_box.remove(&child);
+            }
         }
         for n in center.banners() {
             let (c, close) = card(n);
@@ -533,8 +544,15 @@ impl NotifyUi {
         }
         if now.banners.is_empty() {
             self.banner_window.set_keyboard_mode(KeyboardMode::None);
+            if leaving {
+                self.leave_banners();
+            }
+        } else if now.banners.iter().any(|id| !before.banners.contains(id))
+            || !self.banner_bin.can_target()
+        {
+            // A new banner (or one returning mid-slide) drops in.
+            self.enter_banners();
         }
-        self.banner_window.set_visible(!now.banners.is_empty());
 
         // History list.
         self.group_widgets.borrow_mut().clear();
@@ -551,9 +569,23 @@ impl NotifyUi {
                 // A group of one is just its card.
                 [n] => {
                     let (c, close) = card(n);
-                    let (me, id) = (self.clone(), n.id);
-                    close.connect_clicked(move |_| me.remove(&[id]));
-                    self.list.append(&c);
+                    let item = crate::transient::MotionBin::new(&c);
+                    let (me, id, weak) = (self.clone(), n.id, item.downgrade());
+                    close.connect_clicked(move |_| {
+                        // GNOME zooms the message out, then removes it.
+                        let Some(item) = weak.upgrade() else {
+                            return;
+                        };
+                        item.set_can_target(false);
+                        let me = me.clone();
+                        item.animate(
+                            &crate::transient::Player::new("message"),
+                            crate::transient::MESSAGE_MS,
+                            |_, t| crate::transient::message(t, false),
+                            move || me.remove(&[id]),
+                        );
+                    });
+                    self.add_item(&item, !before.history.contains(&n.id));
                 }
                 _ => {
                     let group = crate::group_animation::Group::new(
@@ -561,7 +593,12 @@ impl NotifyUi {
                         &self.expanded_group(key, &members),
                         now.expanded.contains(key),
                     );
-                    self.list.append(&group.widget);
+                    let item = crate::transient::MotionBin::new(&group.widget);
+                    // A group is new when none of its cards were listed.
+                    self.add_item(
+                        &item,
+                        members.iter().all(|n| !before.history.contains(&n.id)),
+                    );
                     self.group_widgets.borrow_mut().insert(key.clone(), group);
                 }
             }
@@ -577,6 +614,54 @@ impl NotifyUi {
         self.clear.set_sensitive(any);
         drop(center);
         *self.shown.borrow_mut() = now;
+    }
+
+    /// Append a list item, zooming it in when it is new and the list is
+    /// on screen (`_addMessage`).
+    fn add_item(&self, item: &crate::transient::MotionBin, new: bool) {
+        self.list.append(item);
+        if new && self.list.is_mapped() {
+            item.animate(
+                &crate::transient::Player::new("message"),
+                crate::transient::MESSAGE_MS,
+                |_, t| crate::transient::message(t, true),
+                || {},
+            );
+        }
+    }
+
+    /// Drop the banners in: fade, slide down and grow from 90%.
+    fn enter_banners(&self) {
+        self.banner_bin.set_can_target(true);
+        self.banner_window.set_visible(true);
+        self.banner_bin.animate(
+            &self.banner_motion,
+            crate::transient::BANNER_MS,
+            |bin, t| crate::transient::banner_enter(t, f64::from(bin.height())),
+            || {},
+        );
+    }
+
+    /// Slide the last banners back up, then hide their surface.
+    fn leave_banners(self: &Rc<Self>) {
+        self.banner_bin.set_can_target(false);
+        let weak = Rc::downgrade(self);
+        self.banner_bin.animate(
+            &self.banner_motion,
+            crate::transient::BANNER_MS,
+            |bin, t| crate::transient::banner_leave(t, f64::from(bin.height())),
+            move || {
+                let Some(me) = weak.upgrade() else {
+                    return;
+                };
+                me.banner_window.set_visible(false);
+                while let Some(child) = me.banner_box.first_child() {
+                    me.banner_box.remove(&child);
+                }
+                me.banner_bin.set_frame(crate::transient::Frame::REST);
+                me.banner_bin.set_can_target(true);
+            },
+        );
     }
 
     /// Close notifications from the list (and any banner they hold).
