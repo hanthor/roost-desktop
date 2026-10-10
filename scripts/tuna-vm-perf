@@ -26,6 +26,7 @@ from perf_trace_diagnostics import decode as decode_trace_failure, MAX_BYTES as 
 from gnome_failed_capture import validate_receipt as validate_failed_capture, validate_chunk as validate_failed_chunk
 from gnome_stop_boundary import capture_stop_boundary_evidence
 from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, frame_source_evidence  # noqa: E402
+from perf_budget import phase_cpu  # noqa: E402
 
 
 def guest_probe(agent, action, index=None, out=None):
@@ -471,9 +472,14 @@ def main():
         time.sleep(30)
         guest_phases["idle_end"] = guest_probe(agent, "clock")["boottime_s"]
         phases["idle_end"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        # Guest clock markers bound each workload phase, so reports can
+        # attribute CPU per phase and per process (#315).
+        guest_phases["frames_start"] = guest_phases["idle_end"]
         presentation = guest_probe(agent, "frames")["presentation"]
+        guest_phases["frames_end"] = guest_probe(agent, "clock")["boottime_s"]
         (out / "presentation.json").write_text(json.dumps(presentation, indent=2))
         pacing = presentation_summary(presentation)
+        guest_phases["typing_start"] = guest_probe(agent, "clock")["boottime_s"]
         for query in ("disks", "system monitor", "files"):
             qmp.keys("meta_l")
             time.sleep(1)
@@ -481,11 +487,13 @@ def main():
             time.sleep(1)
             qmp.keys("ret")
             time.sleep(8)
+        guest_phases["typing_end"] = guest_probe(agent, "clock")["boottime_s"]
         if trace_required(args.desktop, args.gnome_profile):
             guest_probe(agent, "gnome-trace-start", out=out)
             gnome_trace_active = True
             time.sleep(1)  # Preserve pre-input scopes after the actual drained boundary.
         phases["workload_start"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        guest_phases["overview_start"] = guest_probe(agent, "clock")["boottime_s"]
         for index in range(20):
             before = frame(qmp, scratch / "before.ppm")
             start = time.monotonic()
@@ -506,15 +514,25 @@ def main():
             else:
                 raise RuntimeError(f"overview input {index} produced no broad visible response")
             time.sleep(1)
+        guest_phases["overview_end"] = guest_probe(agent, "clock")["boottime_s"]
         if gnome_trace_active:
             metadata = guest_probe(agent, "gnome-trace-stop", out=out)["gnome_trace"]
             gnome_trace_active = False
             gnome_trace_summary = retain_gnome_trace(agent, out, metadata)
+        guest_phases["workspaces_start"] = guest_probe(agent, "clock")["boottime_s"]
         for _ in range(10):
             qmp.keys("meta_l", "pgdn")
             time.sleep(1)
             qmp.keys("meta_l", "pgup")
             time.sleep(1)
+        guest_phases["workspaces_end"] = guest_probe(agent, "clock")["boottime_s"]
+        # Alt+Tab between the three open applications. Both desktops switch
+        # on a quick press without holding the popup open.
+        guest_phases["window_cycling_start"] = guest_probe(agent, "clock")["boottime_s"]
+        for _ in range(10):
+            qmp.keys("alt", "tab")
+            time.sleep(1)
+        guest_phases["window_cycling_end"] = guest_probe(agent, "clock")["boottime_s"]
         phases["workload_end"] = time.clock_gettime(time.CLOCK_BOOTTIME)
         guest_phases["notifications_start"] = guest_probe(agent, "clock")["boottime_s"]
         for index in range(10):
@@ -526,7 +544,9 @@ def main():
         guest_phases["notifications_end"] = guest_probe(agent, "clock")["boottime_s"]
         if len({row["notification_id"] for row in notifications}) != 10:
             raise RuntimeError("notification workload did not accept ten distinct notifications")
+        guest_phases["settle_start"] = guest_probe(agent, "clock")["boottime_s"]
         time.sleep(30)
+        guest_phases["settle_end"] = guest_probe(agent, "clock")["boottime_s"]
         if original_reference is not None:
             final_reference = guest_probe(agent, 'stock-reference')['stock_reference']
             (out / 'stock-reference-after.json').write_text(json.dumps(final_reference, indent=2))
@@ -561,6 +581,7 @@ def main():
                   "whole_user_cpu_observed_percent":distribution([s["cpu_observed_percent"] for s in samples if s["cpu_observed_percent"] is not None]),
                   "idle_user_cpu_observed_percent": idle_cpu(samples, guest_phases["idle_start"], guest_phases["idle_end"]),
                   "guest_phases_boottime_s": guest_phases,
+                  "phase_cpu_observed_percent": phase_cpu(samples, guest_phases),
                   "accepted_notification_count": len(notifications),
                   "drm_memory": drm_memory_summary(samples),
                   "presentation_cadence": pacing,
@@ -573,7 +594,7 @@ def main():
                                  "Whole-run summaries include startup and workload. Idle PSS and CPU uses guest-clock markers and only intervals wholly within the idle phase.",
                                  "DRM memory is optional driver-provided client accounting, not unique physical GPU allocation; unavailable samples are explicit.",
                                  "Notification IDs prove service acceptance, not notification input-to-frame latency. Presentation cadence is a native client workload; compositor input tracing, multiple cold/warm boots and 24-hour soak remain open.",
-                                 "No release threshold or claim of within-10-percent parity is introduced."]}
+                                 "Regression budgets are applied across paired runs by scripts/tuna-perf-gate (docs/perf/budgets.json); this report alone makes no parity claim."]}
         (out / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))
     except BaseException as error:

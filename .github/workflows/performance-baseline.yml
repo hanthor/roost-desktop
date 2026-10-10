@@ -9,17 +9,34 @@ on:
       - scripts/lib/tuna-frame-pacer.c
       - scripts/lib/tuna-perf-*.py
       - scripts/lib/perf_vm_lifetime.py
+      - scripts/lib/perf_budget.py
+      - scripts/tuna-perf-gate
       - scripts/lib/gnome_sysprof.py
       - scripts/lib/gnome_reference.py
       - scripts/lib/fixtures/sysprof-mark.*
       - scripts/lib/fixtures/gnome51-*
       - packaging/marlin/perf/**
+  # Nightly regression gate (#315): the latest trusted main package against
+  # GNOME 51 in the same job, failing when a budget in docs/perf/budgets.json
+  # regresses. Kept off the per-PR critical path; dispatch it on a PR branch
+  # with `gh workflow run performance-baseline.yml --ref <branch>`.
+  schedule:
+    - cron: '23 3 * * *'
   workflow_dispatch:
     inputs:
       package_run:
         description: Successful main ci run containing tuna-arch (empty selects latest)
         required: false
         type: string
+      enforce:
+        description: Fail the run when a performance budget regresses
+        required: false
+        type: boolean
+        default: true
+concurrency:
+  # One paired run per ref at a time; never cancel a measurement midway.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
   actions: read
@@ -34,6 +51,7 @@ jobs:
       - run: python3 scripts/lib/tuna-perf-vm-lifetime-tests.py
       - run: python3 scripts/lib/tuna-perf-reference-tests.py
       - run: python3 scripts/lib/tuna-kernel-trace-tests.py
+      - run: python3 scripts/lib/tuna-perf-gate-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -145,6 +163,17 @@ jobs:
         # from its separately guarded immutable image on this original host.
         if: ${{ !cancelled() && steps.shared_payload.outcome == 'success' }}
         run: scripts/tuna-perf-profile-pairs stock
+      - name: Check budgets against the paired GNOME 51 run
+        # Scheduled and dispatched runs enforce; a pull request changing the
+        # measurement code only reports, since it measures main's package.
+        if: ${{ !cancelled() && steps.shared_payload.outcome == 'success' }}
+        env:
+          ENFORCE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.enforce) }}
+        run: |
+          set -euo pipefail
+          mode=()
+          if [[ "$ENFORCE" != true ]]; then mode=(--report-only); fi
+          scripts/tuna-perf-gate check --artifacts perf-artifacts --out perf-artifacts/perf-gate.json --markdown "$GITHUB_STEP_SUMMARY" "${mode[@]}"
       - name: Upload performance artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()

@@ -63,12 +63,27 @@ def capture_globals(uid):
 def read_process(path):
     status = dict(line.split(":", 1) for line in (path / "status").read_text().splitlines() if ":" in line)
     # The command field can contain spaces and closing parentheses.
-    fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+    head, tail = (path / "stat").read_text().rsplit(")", 1)
+    fields = tail.split()
     return {
         "pid": int(path.name), "uid": int(status["Uid"].split()[0]), "state": fields[0],
         "ppid": int(fields[1]), "start_ticks": int(fields[19]),
         "cpu_ticks": int(fields[11]) + int(fields[12]),
+        # Names let reports attribute CPU to compositor, shell, Xwayland and
+        # portals (#315). comm is the kernel's 15-byte name; cmd is argv[0]'s
+        # basename, never the arguments.
+        "comm": head.split("(", 1)[1][:15],
     }
+
+
+def command_name(path):
+    """Basename of argv[0], bounded; None for kernel threads or a racing exit."""
+    try:
+        argv0 = (path / "cmdline").read_bytes().split(b"\0", 1)[0]
+    except OSError:
+        return None
+    name = os.path.basename(argv0.decode("utf-8", errors="replace"))[:64]
+    return name or None
 
 
 def drm_clients(path):
@@ -156,6 +171,7 @@ def sample(uid, proc=Path("/proc"), observer=None):
             row.update(pss_kib=int(memory["Pss"].split()[0]), rss_kib=int(memory["Rss"].split()[0]),
                        fds=len(list((path / "fd").iterdir())))
             row["drm_clients"], row["drm_errors"] = drm_clients(path)
+            row["cmd"] = command_name(path)
             current_identity = read_process(path)
             if current_identity["start_ticks"] != row["start_ticks"] or current_identity["uid"] != uid:
                 errors.append({"pid": pid, "error": "ProcessIdentityChanged"})
