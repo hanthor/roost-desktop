@@ -43,7 +43,9 @@ popup_entry = Gtk.Entry()
 popup_entry.update_property([Gtk.AccessibleProperty.LABEL], ["IME Popover Field"])
 popover.set_child(popup_entry)
 popover.connect("show", lambda *_: popup_entry.grab_focus())
-popover.connect("closed", lambda *_: entry.grab_focus())
+# No grab on "closed": grabbing while the popover hides races the
+# compositor's focus restore and leaves in-client focus anywhere but the
+# entry (#566). The proof clicks the entry itself when it needs focus.
 menu.set_popover(popover)
 box.append(menu)
 win.set_child(box)

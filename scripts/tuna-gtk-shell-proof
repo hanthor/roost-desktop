@@ -473,6 +473,20 @@ fi
 gsettings reset org.gnome.desktop.calendar week-start-day
 gsettings reset org.gnome.desktop.calendar show-weekdate
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
+# Candidate and thumbnail pixel gates assume GNOME's blue accent; pin it so
+# a vendor default (orange on Ubuntu) cannot move the highlight (#566).
+# Hosts without the key fall back to libadwaita's built-in blue.
+# TEMPORARY diagnostic for #566: which settings source the shell follows.
+echo "tuna-gtk-shell-proof: accent setup: interface-range: $(gsettings range org.gnome.desktop.interface accent-color 2>&1 | head -1)"
+if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface accent-color 'blue'
+fi
+# An out-of-process Settings portal would read the runner's own dconf
+# database rather than this proof's keyfile; pin blue there as well.
+# Ephemeral CI workers only; never fail the proof on it.
+env -u GSETTINGS_BACKEND -u XDG_CONFIG_HOME GSETTINGS_BACKEND=dconf \
+    gsettings set org.gnome.desktop.interface accent-color 'blue' >/dev/null 2>&1 || true
+echo "tuna-gtk-shell-proof: accent setup: keyfile: $(gsettings get org.gnome.desktop.interface accent-color 2>&1) gtk-theme: $(gsettings get org.gnome.desktop.interface gtk-theme 2>&1) host-dconf: $(env -u GSETTINGS_BACKEND -u XDG_CONFIG_HOME GSETTINGS_BACKEND=dconf gsettings get org.gnome.desktop.interface accent-color 2>&1)"
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/tuna-bl"
@@ -3327,6 +3341,27 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     # Restore the end caret explicitly so the candidate appends to the
     # surrounding-text fixture rather than replacing that selection.
     [ "$(cat "$IME_OUT")" = "你|你好|2" ] || fail G-IME-CANDIDATES "popover focus changed the surrounding-text fixture"
+    # In-client focus after the popover checks is not the entry: dumps show
+    # it parked on the menu toggle, so IM is inactive and the bridge would
+    # bypass typed keys past IBus (#566). Click the entry the way a user
+    # would, then sync on the bridge's own focus report.
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-ime "$ARTIFACTS/a11y-ime-field.json" 20 ||
+        fail G-IME-CANDIDATES "entry dump failed"
+    # shellcheck disable=SC2046 # four numbers
+    set -- $(jq -r '.windows[] | select(.app_id == "tuna-ime") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")
+    ime_x=$1 ime_y=$2
+    # shellcheck disable=SC2046 # four numbers
+    set -- $(jq -r '[.[] | select(.name == "IME Field") | .bounds] | .[0] | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$ARTIFACTS/a11y-ime-field.json")
+    { [ "$1" = null ] || [ -z "$1" ]; } && fail G-IME-CANDIDATES "no IME Field bounds to click"
+    ex=$1 ey=$2 ew=$3 eh=$4
+    xdotool mousemove --window "$WID" $((ime_x + ex + ew / 2)) $((ime_y + ey + eh / 2)) click 1
+    end=$(($(date +%s) + 10))
+    until [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+            "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] || \
+          [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+      "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] ||
+        fail G-IME-CANDIDATES "clicking the entry never made it IM-active"
     xdotool key End
     end=$(($(date +%s) + 5))
     until [ "$(grep '^tuna-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "tuna-ibus-test-engine: surrounding 你|你好|2 6 6" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
@@ -3340,6 +3375,18 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
     grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
         fail G-IME-CANDIDATES "the shell never became IBus's panel"
+    # The popover, quick-settings, and drag checks above park and restore
+    # focus around the field: the window being focused again does not imply
+    # the field is IM-active yet, and typing while it is not reaches the
+    # bridge as plain keys that bypass IBus (#566). Re-sync on the bridge's
+    # own focus report, like the first composition above does.
+    end=$(($(date +%s) + 10))
+    until [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+            "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] || \
+          [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+      "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] ||
+        fail G-IME-CANDIDATES "the field never became IM-active after the popover checks"
     shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "tuna-ibus-candidates")' "candidate window" 10 ||
@@ -3372,7 +3419,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$near" = yes ] ||
         fail G-IME-CANDIDATES "the candidate window ($popup) is not under the text cursor ($cursor)"
     # GNOME's popup surface (#36363a) in its top padding, and the
-    # highlighted first row in the accent (#3584e4).
+    # highlighted first row in the session accent.
     # shellcheck disable=SC2046
     set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($5 + 30)) $(($6 + 9))) "$5" "$6"
     if [ "${1:-0}" -lt 46 ] || [ "${1:-0}" -gt 62 ] || [ "${3:-0}" -lt 50 ] || [ "${3:-0}" -gt 66 ]; then
@@ -3380,12 +3427,23 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     fi
     surface="$1 $2 $3"
     row0="$(grep 'ibus candidate 0 你 at' "$LOG" | tail -1 | sed 's/.* at //')"
+    [ -n "$row0" ] || fail G-IME-CANDIDATES "the first row was never laid out"
     # shellcheck disable=SC2086 # four numbers
     set -- $row0
     # shellcheck disable=SC2046
     set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($1 + 3)) $(($2 + $4 / 2)))
-    [ "${3:-0}" -gt $((${1:-255} + 60)) ] ||
-        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel ${1:-?} ${2:-?} ${3:-?})"
+    r0=$1 g0=$2 b0=$3
+    # The selected row follows the session accent (blue on dev hosts,
+    # orange under Ubuntu's default), so assert a vivid highlight rather
+    # than one hue: outside the bare surface box. The sampled hue stays
+    # in the log for the ledger.
+    hl="$(awk -v r0="$r0" -v g0="$g0" -v b0="$b0" 'BEGIN {
+        mx0 = (r0>g0 ? (r0>b0 ? r0 : b0) : (g0>b0 ? g0 : b0))
+        mn0 = (r0<g0 ? (r0<b0 ? r0 : b0) : (g0<b0 ? g0 : b0))
+        bare = (r0>=46 && r0<=62 && b0>=50 && b0<=66)
+        print (!bare && (mx0-mn0)>100 && mx0>150) ? "yes" : "no" }')"
+    [ "$hl" = yes ] ||
+        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel $r0 $g0 $b0)"
     row1="$(grep 'ibus candidate 1 尼 at' "$LOG" | tail -1 | sed 's/.* at //')"
     # shellcheck disable=SC2086 # four numbers
     set -- $row1
@@ -3416,6 +3474,18 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     if grep -q 'No IM module matching GTK_IM_MODULE=xim' "$ARTIFACTS/xim-window.log"; then
         fail G-IME-XIM "the client has no XIM module"
     fi
+    # Focus can drift between the check above and typing, leaving the
+    # keystrokes with no surface (#566 family). Click the field the way a
+    # user would, then re-verify focus immediately before typing.
+    xim_rect="$(jq -r '.windows[] | select(.app_id == "tuna-xim") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $xim_rect
+    { [ "$1" = null ] || [ -z "$1" ]; } && fail G-IME-XIM "the X11 field vanished before typing"
+    xrx=$1 xry=$2 xrw=$3 xrh=$4
+    xdotool mousemove --window "$WID" $((xrx + xrw / 2)) $((xry + xrh / 2)) click 1
+    sleep 0.5
+    cstate '.focused_app_id == "tuna-xim"' "XIM focus before typing" ||
+        fail G-IME-XIM "the X11 field lost focus before typing"
     xdotool type --delay 100 nihao
     xdotool key space
     end=$(($(date +%s) + 10))
@@ -3847,7 +3917,13 @@ scrot "$ARTIFACTS/24g-workspace-thumbnails.png" >/dev/null
 ring="$(jq -r '.thumbnails[] | select(.active) | .rect | "\(.[0] - 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
 # shellcheck disable=SC2046,SC2086
 set -- $(px "$ARTIFACTS/24g-workspace-thumbnails.png" $ring)
-if [ "${3:-0}" -le 180 ] || [ "${1:-255}" -ge 100 ]; then
+# The ring follows the session accent (blue on dev hosts, orange under
+# Ubuntu's default): assert a vivid indicator rather than one hue.
+ring_vivid="$(awk -v r="$1" -v g="$2" -v b="$3" 'BEGIN {
+    mx = (r>g ? (r>b ? r : b) : (g>b ? g : b))
+    mn = (r<g ? (r<b ? r : b) : (g<b ? g : b))
+    print ((mx-mn)>100 && mx>150) ? "yes" : "no" }')"
+if [ "$ring_vivid" != yes ]; then
     fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
 fi
 target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
@@ -4234,24 +4310,32 @@ ln -s "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other/device"
 echo 1000 >"$ARTIFACTS/backlight/aaa-other/max_brightness"
 echo 700 >"$ARTIFACTS/backlight/aaa-other/brightness"
 echo 500 >"$BACKLIGHT/brightness"
-gsettings set org.gnome.shell.keybindings screen-brightness-up-monitor "['<Super>F5']"
-gsettings set org.gnome.shell.keybindings screen-brightness-down-monitor "['<Super>F4']"
-gsettings set org.gnome.shell.keybindings screen-brightness-cycle-monitor "['<Super>F3']"
+# The per-monitor actions stay on their GNOME defaults
+# (Shift+XF86MonBrightness*): custom chords are covered by
+# SWITCHER-REBIND, and startup grabs avoid mid-run re-grab races.
 sleep 1.5
 xdotool mousemove --window "$WID" 600 450
-for spec in 'F5:550' 'F4:500' 'F3:550'; do
-    xdotool key "super+${spec%%:*}"
-    end=$(($(date +%s) + 10))
-    until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+for spec in 'XF86MonBrightnessUp:550' 'XF86MonBrightnessDown:500' 'XF86MonBrightnessCycle:550'; do
+    # One press can land before a grab reaches the compositor; press
+    # until the file moves, at most one step per press.
+    end=$(($(date +%s) + 15))
+    until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do
+        xdotool key "shift+${spec%%:*}"
+        sleep 1
+    done
     [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || fail G-MONITOR-BRIGHTNESS-KEYS "${spec%%:*} did not set ${spec#*:} on the pointer's monitor"
     [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
 done
 echo 1000 >"$BACKLIGHT/brightness"
-fkey_tap Super_L ffc0 || fail G-MONITOR-BRIGHTNESS-KEYS "Super+F3 tap failed"
-end=$(($(date +%s) + 10))
+# Cycle through the default chord like up/down above: the custom Super+F3
+# this step used to tap is no longer bound (see the loop comment).
+end=$(($(date +%s) + 15))
+until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do
+    xdotool key "shift+XF86MonBrightnessCycle"
+    sleep 1
+done
 # GNOME normalized zero maps to the hardware minimum, not a powered-off
 # panel: Mutter's sysfs floor is max(1, max_brightness / 100).
-until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
 [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || fail G-MONITOR-BRIGHTNESS-KEYS "cycle did not wrap to the GNOME hardware minimum"
 for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
     gsettings reset org.gnome.shell.keybindings "$key"

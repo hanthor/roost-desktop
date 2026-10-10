@@ -420,6 +420,8 @@ struct Bridge {
     incoming: Rc<RefCell<VecDeque<FromIbus>>>,
     /// `done` events so far: the serial a commit names.
     serial: u32,
+    /// TEMPORARY diagnostic for issue #566: trace input-method events.
+    im_seq: u64,
     /// Activation pending the next `done`, and the applied one.
     pending_active: Option<bool>,
     active: bool,
@@ -485,9 +487,12 @@ impl Bridge {
         if debug() {
             // This grab also forwards password/PIN keys. Diagnostics must
             // never make their values recoverable, even with tracing enabled.
+            // TEMPORARY diagnostic for issue #566: active/context state.
             eprintln!(
-                "tuna-ibus-bridge: key pressed {pressed}: IBus took it: {handled} ({:?})",
-                started.elapsed()
+                "tuna-ibus-bridge: key pressed {pressed}: IBus took it: {handled} ({:?}) active={} ctx={}",
+                started.elapsed(),
+                self.active,
+                self.context.is_some(),
             );
         }
         if let Some((_, xkb_state)) = &mut self.xkb {
@@ -576,8 +581,17 @@ impl Bridge {
     /// content type, surrounding text and cursor), as GNOME Shell does.
     fn done(&mut self, qh: &QueueHandle<Self>) {
         self.serial = self.serial.wrapping_add(1);
+        // TEMPORARY diagnostic for issue #566.
+        let had_pending = self.pending_active;
         if let Some(active) = self.pending_active.take() {
             self.activate(active, qh);
+        }
+        if debug() {
+            self.im_seq += 1;
+            eprintln!(
+                "tuna-ibus-bridge: im-event #{} done had_pending={:?} applied={}",
+                self.im_seq, had_pending, self.active,
+            );
         }
         if !self.active {
             return;
@@ -704,8 +718,26 @@ impl Dispatch<ZwpInputMethodV2, ()> for Bridge {
                 state.pending_active = Some(true);
                 state.pending_surrounding = None;
                 state.pending_content_type = Some((0, 0));
+                // TEMPORARY diagnostic for issue #566.
+                if debug() {
+                    state.im_seq += 1;
+                    eprintln!(
+                        "tuna-ibus-bridge: im-event #{} activate pending={:?} applied={}",
+                        state.im_seq, state.pending_active, state.active,
+                    );
+                }
             }
-            zwp_input_method_v2::Event::Deactivate => state.pending_active = Some(false),
+            zwp_input_method_v2::Event::Deactivate => {
+                state.pending_active = Some(false);
+                // TEMPORARY diagnostic for issue #566.
+                if debug() {
+                    state.im_seq += 1;
+                    eprintln!(
+                        "tuna-ibus-bridge: im-event #{} deactivate pending={:?} applied={}",
+                        state.im_seq, state.pending_active, state.active,
+                    );
+                }
+            }
             zwp_input_method_v2::Event::SurroundingText {
                 text,
                 cursor,

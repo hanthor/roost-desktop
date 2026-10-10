@@ -1697,6 +1697,10 @@ fn build(app: &adw::Application) {
                             .as_ref()
                             .and_then(|c| c.pointer_output().map(str::to_owned));
                         // No pointer-output/backlight match means no write to a different screen.
+                        // TEMPORARY diagnosis for #566: which side is None.
+                        eprintln!(
+                            "tuna-shell-gtk: brightness-monitor: monitor={monitor} output={output:?}"
+                        );
                         if monitor && output.is_none() {
                             return;
                         }
