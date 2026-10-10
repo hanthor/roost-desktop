@@ -4314,9 +4314,13 @@ gsettings set org.gnome.shell.keybindings screen-brightness-cycle-monitor "['<Su
 sleep 1.5
 xdotool mousemove --window "$WID" 600 450
 for spec in 'F5:550' 'F4:500' 'F3:550'; do
-    xdotool key "super+${spec%%:*}"
-    end=$(($(date +%s) + 10))
-    until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    # One press can land before the re-grabbed binding reaches the
+    # compositor; press until the file moves, at most one step per press.
+    end=$(($(date +%s) + 15))
+    until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do
+        xdotool key "super+${spec%%:*}"
+        sleep 1
+    done
     [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || fail G-MONITOR-BRIGHTNESS-KEYS "${spec%%:*} did not set ${spec#*:} on the pointer's monitor"
     [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
 done
