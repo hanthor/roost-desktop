@@ -40,6 +40,7 @@ jobs:
       - run: python3 scripts/lib/ledger-tests.py
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
+      - run: python3 scripts/lib/mutter-profiler-integrity-tests.py
       - run: python3 scripts/lib/tuna-perf-payload-tests.py
       - run: python3 scripts/lib/tuna-perf-reference-tests.py
       - run: python3 scripts/lib/tuna-perf-repeatability-tests.py
