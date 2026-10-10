@@ -199,14 +199,13 @@ fn install_focus_policy(settings: gio::Settings) {
             .bind(FOCUS_KEY, &toolkit, "gtk-keyboard-focus-visible-timeout")
             .build();
         // Toolkit owns keyboard/mouse handling and timers on GTK >= 4.23.3.
-        std::mem::forget(settings);
         return;
     }
     // Older GTK has a fixed three-second timer. Refresh it while the
     // requested duration is alive, using a weak window and no input grabs.
     let windows = gtk::Window::toplevels();
     let install: Rc<dyn Fn(gtk::Window)> = Rc::new(move |window| {
-        let last = Rc::new(Cell::new(None::<Instant>));
+        let last = Rc::new(Cell::new(window.gets_focus_visible().then(Instant::now)));
         let key = gtk::EventControllerKey::new();
         key.set_propagation_phase(gtk::PropagationPhase::Capture);
         let pressed = last.clone();
@@ -386,7 +385,27 @@ mod tests {
         let schema = source.lookup("org.tuna.FocusPolicy", false).unwrap();
         let prefs = gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None);
         prefs.set_int(FOCUS_KEY, 1).unwrap();
+        let existing = gtk::Window::new();
+        existing.set_focus_visible(true);
+        prefs.set_int(FOCUS_KEY, 0).unwrap();
         install_focus_policy(prefs.clone());
+        existing.present();
+        drain(3.5);
+        assert!(
+            existing.gets_focus_visible(),
+            "already-visible window remains visible after policy installation"
+        );
+        let inherited = gtk::Window::new();
+        inherited.set_transient_for(Some(&existing));
+        inherited.present();
+        drain(3.5);
+        assert!(
+            inherited.gets_focus_visible(),
+            "new transient inherits visible focus and honors forever"
+        );
+        inherited.destroy();
+        existing.destroy();
+        prefs.set_int(FOCUS_KEY, 1).unwrap();
         let window = gtk::Window::new();
         window.set_child(Some(&button));
         window.present();
