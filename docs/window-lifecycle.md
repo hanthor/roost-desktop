@@ -42,8 +42,10 @@ qualification limitations, not passing parity cases.
 
 ```sh
 cargo test -p tuna-compositor --lib --no-default-features window_lifecycle
-flock /tmp/tuna-v1-build-and-freeze.lock sh -c '
-  set -eu
+flock /tmp/tuna-v1-build-and-freeze.lock bash -c '
+  set -euo pipefail
+  cargo metadata --no-deps --format-version=1 | jq -r ".workspace_members[]" |
+    while IFS= read -r package; do cargo clean -p "$package"; done
   cargo build -p tuna-compositor -p tuna-shell-gtk
   mkdir -p /tmp/tuna-window-binaries
   cp "${CARGO_TARGET_DIR:-target}/debug/tuna-compositor" \
@@ -64,7 +66,9 @@ and absence of stale pixels at completion. It also checks reduced-motion
 normal-window transforms and immediate map/destroy with animations off.
 The proof copies the supplied binaries into its artifact directory and records
 SHA-256 hashes, source revision, dirty status and renderer in `manifest.json`.
-Build both binaries from the same checkout before running it. All parallel
+Build both binaries from the same checkout before running it. Clean workspace
+package outputs when different checkouts share a Cargo target directory;
+third-party dependency artifacts can remain cached. All parallel
 native builders must use the same build-and-freeze lock: Cargo releases its
 lock before a caller copies the binaries. Compare the recorded hashes against the owned
 build bundle before treating the run as qualification.
