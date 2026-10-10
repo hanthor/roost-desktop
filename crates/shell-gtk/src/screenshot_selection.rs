@@ -84,6 +84,14 @@ impl SelectionKeys {
         if width < 1.0 || height < 1.0 || !width.is_finite() || !height.is_finite() {
             return self.rect();
         }
+        // A mouse drag can end exactly on the output boundary with a
+        // zero-sized area, and the output can shrink between key presses.
+        // Clamp both endpoints before moving or selecting an edge: those
+        // paths do not otherwise clamp the untouched axis.
+        self.start.0 = self.start.0.clamp(0.0, width - 1.0);
+        self.last.0 = self.last.0.clamp(0.0, width - 1.0);
+        self.start.1 = self.start.1.clamp(0.0, height - 1.0);
+        self.last.1 = self.last.1.clamp(0.0, height - 1.0);
         let amount = if control {
             1.0
         } else if shift {
@@ -222,5 +230,44 @@ mod tests {
         keys = keys.reset_area(initial);
         assert_eq!(keys.rect(), initial);
         assert_eq!(keys.side, side);
+    }
+
+    #[test]
+    fn moving_a_zero_sized_boundary_drag_clamps_the_untouched_axis() {
+        let mut keys = SelectionKeys::new(Rect {
+            x: 1280.0,
+            y: 800.0,
+            w: 0.0,
+            h: 0.0,
+        });
+        assert_eq!(
+            keys.adjust(Direction::Left, true, true, false, (1280.0, 800.0)),
+            Rect {
+                x: 1278.0,
+                y: 799.0,
+                w: 1.0,
+                h: 1.0
+            },
+        );
+    }
+
+    #[test]
+    fn shrinking_output_bounds_both_axes_before_edge_selection_or_movement() {
+        for move_area in [false, true] {
+            let mut keys = SelectionKeys::new(initial_selection(1280.0, 800.0));
+            let r = keys.adjust(Direction::Up, move_area, false, false, (17.0, 13.0));
+            assert!(r.x >= 0.0 && r.y >= 0.0 && r.w >= 1.0 && r.h >= 1.0);
+            assert!(r.x + r.w <= 17.0 && r.y + r.h <= 13.0);
+            // Even a single logical pixel output retains a capturable area.
+            assert_eq!(
+                keys.adjust(Direction::Right, move_area, false, true, (1.0, 1.0)),
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0
+                },
+            );
+        }
     }
 }
