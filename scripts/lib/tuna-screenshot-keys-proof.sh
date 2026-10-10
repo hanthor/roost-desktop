@@ -43,7 +43,10 @@ while IFS='|' read -r shot_keys shot_dims shot_position shot_label shot_pointer;
     done
     cstate ".active_workspace == $shot_workspace and (.overview_open | not)" "screenshot keeps workspace" ||
         fail G-SCREENSHOT-KEYS "$shot_label navigation escaped into desktop shortcuts"
-    cstate ".pointer_position == [$shot_pointer]" "screenshot keyboard pointer feedback" ||
+    # Winit's integer host motion normalizes through floating-point output
+    # coordinates (e.g. 498 becomes 498.00000000000006). This tolerance is
+    # far below a pixel; the visible host cursor is checked separately.
+    cstate "((.pointer_position[0] - ${shot_pointer%,*}) | fabs) < 0.000001 and ((.pointer_position[1] - ${shot_pointer#*,}) | fabs) < 0.000001" "screenshot keyboard pointer feedback" ||
         fail G-SCREENSHOT-KEYS "$shot_label cursor did not follow the selected edge or area centre"
     cp "$CSTATE" "$ARTIFACTS/shot-keys-$shot_label-compositor.json"
     # Observe the visible nested host cursor too. Seat state alone can
