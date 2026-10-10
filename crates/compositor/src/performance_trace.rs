@@ -6,6 +6,32 @@ use std::time::Duration;
 
 const LIMIT: u64 = 64;
 
+/// Native journal datagrams carry per-record sender credentials. Never fall
+/// back to inherited stdout/stderr streams: their peer metadata can describe
+/// the compositor even when a child writes the record.
+fn emit_to(message: &str, destination: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::net::UnixDatagram;
+    if message.len() > 4096 || message.contains(['\n', '\0']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "receipt bounds",
+        ));
+    }
+    let socket = UnixDatagram::unbound()?;
+    socket.set_nonblocking(true)?;
+    let record = format!("PRIORITY=6\nSYSLOG_IDENTIFIER=tuna-perf-native\nMESSAGE={message}\n");
+    socket.send_to(record.as_bytes(), destination)?;
+    Ok(())
+}
+
+macro_rules! native_receipt {
+    ($($argument:tt)*) => {
+        // Missing socket, full journal queue or an oversized record loses the
+        // receipt; incomplete evidence must refuse qualification on the host.
+        let _ = emit_to(&format!($($argument)*), std::path::Path::new("/run/systemd/journal/socket"));
+    };
+}
+
 /// Observations of the scene actually submitted, not cache population alone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CardReadiness {
@@ -21,7 +47,7 @@ impl CardReadiness {
     }
     fn json(self) -> String {
         format!(
-            "{{\"expected\":{},\"rendered\":{},\"cache\":{},\"pending\":{}}}",
+            "{{\"expected\":{},\"rendered\":{},\"cached\":{},\"pending\":{}}}",
             self.expected
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "null".into()),
@@ -94,7 +120,7 @@ impl Trace {
             opening,
         };
         self.pending.push(input);
-        eprintln!(
+        native_receipt!(
             "tuna-perf-input: {{\"kind\":\"input\",\"id\":{},\"input_ns\":{},\"opening\":{},\"schema\":2}}",
             input.id, input.input_ns, input.opening
         );
@@ -113,7 +139,7 @@ impl Trace {
         for input in &mut self.pending {
             if input.first_cards.is_none() {
                 input.first_cards = Some(cards);
-                eprintln!("tuna-perf-input: {{\"kind\":\"card-candidate\",\"schema\":2,\"id\":{},\"candidate_ns\":{},\"preparation\":\"{}\",\"cards\":{}}}",
+                native_receipt!("tuna-perf-input: {{\"kind\":\"card-candidate\",\"schema\":2,\"id\":{},\"candidate_ns\":{},\"preparation\":\"{}\",\"cards\":{}}}",
                     input.id, at.as_nanos(), if cards.complete() { "ready-on-first-candidate" } else { "incomplete-on-first-candidate" }, cards.json());
             }
         }
@@ -140,9 +166,10 @@ impl Trace {
         let inputs = std::mem::take(&mut self.pending);
         let queued_ns = at.as_nanos();
         for input in &inputs {
-            eprintln!(
+            native_receipt!(
                 "tuna-perf-input: {{\"kind\":\"queued\",\"id\":{},\"queued_ns\":{}}}",
-                input.id, queued_ns
+                input.id,
+                queued_ns
             );
         }
         self.in_flight = Some((queued_ns, inputs, cards));
@@ -168,7 +195,7 @@ impl Trace {
         inputs.into_iter().map(|input| {
             let row = Presented { id: input.id, input_ns: input.input_ns, queued_ns, presented_ns, sequence,
                 first_cards: input.first_cards.expect("queued input observed its candidate"), presented_cards: cards };
-            eprintln!("tuna-perf-input: {{\"kind\":\"presented\",\"id\":{},\"input_ns\":{},\"queued_ns\":{},\"presented_ns\":{},\"sequence\":{},\"schema\":2,\"cards_complete\":true,\"first_cards\":{},\"presented_cards\":{}}}", row.id, row.input_ns, row.queued_ns, row.presented_ns, row.sequence, row.first_cards.json(), row.presented_cards.json());
+            native_receipt!("tuna-perf-input: {{\"kind\":\"presented\",\"id\":{},\"input_ns\":{},\"queued_ns\":{},\"presented_ns\":{},\"sequence\":{},\"schema\":2,\"cards_complete\":true,\"first_cards\":{},\"presented_cards\":{}}}", row.id, row.input_ns, row.queued_ns, row.presented_ns, row.sequence, row.first_cards.json(), row.presented_cards.json());
             row
         }).collect()
     }
@@ -183,7 +210,7 @@ impl Trace {
 
     fn discard(&self, inputs: &[Input]) {
         for input in inputs {
-            eprintln!(
+            native_receipt!(
                 "tuna-perf-input: {{\"kind\":\"discarded\",\"id\":{}}}",
                 input.id
             );
@@ -205,6 +232,36 @@ mod tests {
             cached: 2,
             pending: 0,
         }
+    }
+
+    #[test]
+    fn native_datagram_emission_is_bounded_and_uses_actual_card_schema() {
+        use std::os::unix::net::UnixDatagram;
+        let directory =
+            std::env::temp_dir().join(format!("tuna-native-trace-{}", std::process::id()));
+        std::fs::create_dir(&directory).expect("private test directory");
+        let destination = directory.join("journal");
+        let receiver = UnixDatagram::bind(&destination).expect("test journal socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let message = format!(
+            "tuna-perf-input: {{\"kind\":\"card-candidate\",\"cards\":{}}}",
+            ready().json()
+        );
+        emit_to(&message, &destination).expect("native datagram");
+        let mut raw = [0_u8; 8192];
+        let bytes = receiver.recv(&mut raw).expect("actual emitted receipt");
+        let record = std::str::from_utf8(&raw[..bytes]).unwrap();
+        assert!(record.starts_with("PRIORITY=6\nSYSLOG_IDENTIFIER=tuna-perf-native\nMESSAGE="));
+        assert!(record.contains("\"expected\":2,\"rendered\":2,\"cached\":2,\"pending\":0"));
+        assert!(record.ends_with('\n'));
+        assert!(emit_to(&"x".repeat(4097), &destination).is_err());
+        assert!(emit_to("forged\nMESSAGE=other", &destination).is_err());
+        assert!(emit_to("nul\0record", &destination).is_err());
+        drop(receiver);
+        assert!(emit_to(&message, &destination).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

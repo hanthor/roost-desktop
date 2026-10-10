@@ -40,6 +40,8 @@ def journal_rows(raw, identity, cursor=None):
         message = row.get('MESSAGE', '')
         if not isinstance(message, str) or not message.startswith('tuna-perf-input: '):
             continue
+        if row.get('_TRANSPORT') != 'journal' or row.get('SYSLOG_IDENTIFIER') != 'tuna-perf-native':
+            raise ValueError('native credential journal transport required')
         if (row.get('_PID') != str(identity['pid']) or row.get('_UID') != str(identity['uid'])
                 or row.get('_EXE') != identity['path']
                 or row.get('_BOOT_ID') != identity['boot_id'].replace('-', '')):
@@ -70,6 +72,8 @@ def counts(row):
 
 def validate_capture(receipt, expected_process, expected_image, binary_sha256, source_sha, fixture_image_id):
     """Require original workload's 20 actions and actual, ordered primary flips."""
+    if not isinstance(receipt, dict):
+        raise ValueError('native capture must be an object')
     identity = process_identity(receipt.get('process'))
     if identity != process_identity(expected_process) or identity['sha256'] != binary_sha256:
         raise ValueError('compositor identity changed or original payload differs')

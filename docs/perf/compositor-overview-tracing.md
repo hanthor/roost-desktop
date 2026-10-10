@@ -31,7 +31,9 @@ total power still need their own qualified evidence.
 
 The paired performance image overrides only its Tuna session `Exec` with
 `/usr/libexec/tuna-perf-session`. This wrapper enables the capped trace and
-routes the original `tuna-session` exec chain to journald. Shipping sessions and
+routes ordinary session logs to journald. Native receipts are sent separately
+using nonblocking Unix datagrams to the native journal socket, with at most
+4096 bytes per record and no stream fallback. Shipping sessions and
 the GNOME session are unchanged.
 
 Before the original twenty alternating overview actions, the fixed QGA
@@ -39,7 +41,13 @@ Before the original twenty alternating overview actions, the fixed QGA
 ID. It verifies exactly one live test-user compositor, process start ticks,
 boot ID, trace environment, installed executable inode and SHA-256. The stop
 probe checks that identity again and reads only subsequent anonymous native
-trace records. Trusted journal PID, UID, executable and boot fields must match.
+trace records. The journal transport must be `journal`, the identifier must be
+`tuna-perf-native`, and trusted PID, UID, executable and boot fields must match.
+Inherited stdout/stderr streams are refused: their peer metadata can identify
+the compositor even when a child writes the message. Native journal datagrams
+carry per-record sender credentials. Queue-full, unavailable-journal and
+oversized emission failures drop the record and therefore cannot qualify an
+incomplete capture.
 The bounded original journal JSON bytes and their digest survive in
 `tuna-overview-native.json`; the host independently replays their binding.
 A restarted process, missing boundary, truncated acquisition, older tracing

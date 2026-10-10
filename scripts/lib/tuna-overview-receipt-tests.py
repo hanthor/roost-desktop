@@ -49,7 +49,7 @@ class NativeReceipts(unittest.TestCase):
                  'cards_complete': True, 'first_cards': first, 'presented_cards': ready}]
 
     def source(self, capture):
-        raw = b'\n'.join(json.dumps({'_PID': str(self.identity['pid']), '_UID': str(self.identity['uid']),
+        raw = b'\n'.join(json.dumps({'_TRANSPORT': 'journal', 'SYSLOG_IDENTIFIER': 'tuna-perf-native', '_PID': str(self.identity['pid']), '_UID': str(self.identity['uid']),
                '_EXE': self.identity['path'], '_BOOT_ID': self.identity['boot_id'].replace('-', ''),
                '__CURSOR': 'cursor-'+str(index), 'MESSAGE': 'tuna-perf-input: '+json.dumps(event)}).encode()
                for index, event in enumerate(capture['events']))
@@ -88,6 +88,18 @@ class NativeReceipts(unittest.TestCase):
     def validate_raw(self):
         return receipts.validate_capture(self.capture, self.identity, self.image, 'a'*64, 'b'*40, 'sha256:'+'c'*64)
 
+    def test_legacy_cache_field_and_nonobject_capture_refused(self):
+        capture = copy.deepcopy(self.capture)
+        for row in capture['events']:
+            for key in ('cards', 'first_cards', 'presented_cards'):
+                if key in row:
+                    row[key]['cache'] = row[key].pop('cached', 0)
+        self.source(capture)
+        with self.assertRaisesRegex(ValueError, 'cached'):
+            receipts.validate_capture(capture, self.identity, self.image, 'a'*64, 'b'*40, 'sha256:'+'c'*64)
+        with self.assertRaises(ValueError):
+            receipts.validate_capture([], self.identity, self.image, 'a'*64, 'b'*40, 'sha256:'+'c'*64)
+
     def test_identity_source_and_image_refused(self):
         self.source(self.capture)
         for binary, source, image in (('d'*64, 'b'*40, 'sha256:'+'c'*64), ('a'*64, None, 'sha256:'+'c'*64),
@@ -114,17 +126,25 @@ class NativeReceipts(unittest.TestCase):
                 receipts.validate_capture(capture, self.identity, self.image, 'a'*64, 'b'*40, 'sha256:'+'c'*64)
 
     def test_journal_trusted_fields_bind_actual_process_not_message_claim(self):
-        row = {'_PID': '123', '_UID': '1000', '_EXE': self.identity['path'],
+        row = {'_TRANSPORT': 'journal', 'SYSLOG_IDENTIFIER': 'tuna-perf-native', '_PID': '123', '_UID': '1000', '_EXE': self.identity['path'],
                '_BOOT_ID': self.identity['boot_id'].replace('-', ''), '__CURSOR': 'cursor',
                'MESSAGE': 'tuna-perf-input: '+json.dumps(self.capture['events'][0])}
         parsed, cursor = receipts.journal_rows(json.dumps(row).encode(), self.identity)
         self.assertEqual(parsed, [self.capture['events'][0]])
         self.assertEqual(cursor, 'cursor')
-        for field in ('_PID', '_UID', '_EXE', '_BOOT_ID', '__CURSOR'):
+        for field in ('_TRANSPORT', 'SYSLOG_IDENTIFIER', '_PID', '_UID', '_EXE', '_BOOT_ID', '__CURSOR'):
             changed = dict(row, **{field: 'incorrect' if field != '__CURSOR' else None})
             with self.subTest(field=field), self.assertRaises(ValueError):
                 receipts.journal_rows(json.dumps(changed).encode(), self.identity)
         with self.assertRaises(ValueError): receipts.journal_rows(b' '* (receipts.MAX_BYTES+1), self.identity)
+
+    def test_inherited_stream_cannot_authenticate_compositor_receipt(self):
+        row = {'_TRANSPORT': 'stdout', 'SYSLOG_IDENTIFIER': 'tuna-perf-native',
+               '_PID': '123', '_UID': '1000', '_EXE': self.identity['path'],
+               '_BOOT_ID': self.identity['boot_id'].replace('-', ''), '__CURSOR': 'cursor',
+               'MESSAGE': 'tuna-perf-input: '+json.dumps(self.capture['events'][0])}
+        with self.assertRaisesRegex(ValueError, 'transport'):
+            receipts.journal_rows(json.dumps(row).encode(), self.identity)
 
     def test_host_retains_native_bytes_and_matches_original_package(self):
         self.source(self.capture)
