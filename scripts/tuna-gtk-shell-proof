@@ -3664,7 +3664,14 @@ jq -e --argjson home "$slide_home" \
     fail G-WORKSPACE-SLIDE "the key switch did not slide 250 ms: $(cat "$ARTIFACTS/workspace-slide-key.json")"
 xdotool key super+Page_Up
 anim_clock 10600
-slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
+if ! slide_settled "$slide_home" "slid back"; then
+    # Same late-start hazard as the crossfades below: a loaded runner can
+    # process the key after the tick above, starting the slide at 10600
+    # against the frozen manual clock. Cover it with one more advance
+    # (still below the next section's 11000 base) and re-check.
+    anim_clock 10900
+    slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
+fi
 # Twice in quick succession: the second press carries on from the drawn
 # offset and ends two workspaces over, never moving backwards.
 anim_clock 11000
