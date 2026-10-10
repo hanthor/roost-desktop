@@ -57,6 +57,7 @@ pub mod drm;
 pub mod frame_timing;
 pub mod idle_monitor;
 pub mod ime;
+pub mod input_aids;
 pub mod introspect;
 pub mod layer;
 pub mod lock;
@@ -71,6 +72,7 @@ pub mod overview;
 pub mod pam;
 #[cfg(feature = "drm")]
 mod performance_trace;
+pub mod pointer_aids;
 pub mod popup;
 pub mod protocols;
 pub mod runtime;

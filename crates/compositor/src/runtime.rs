@@ -62,6 +62,8 @@ use tuna_greeter::client::GreeterClient;
 
 use crate::{ClientState, State};
 
+mod aids;
+
 /// Maximum loop rate: dispatch blocks up to this long waiting for events,
 /// so the loop never spins, and repaint stays near 60 Hz. Damage-tracked
 /// repaint replaces this provisional pacing in a later slice.
@@ -592,6 +594,8 @@ pub struct Runtime {
     scale: f64,
     /// GNOME's input settings as last applied (#60).
     input_settings: tuna_shell_control::InputSettings,
+    /// GNOME's keyboard accessibility aids, ahead of everything else (#350).
+    input_aids: aids::RuntimeAids,
     /// PipeWire, connected on the first screen cast (#61).
     pipewire: Option<crate::screencast::PipeWire>,
     /// Running screen casts.
@@ -747,7 +751,7 @@ impl Runtime {
                             Backend::Winit(_) => Vec::new(),
                         };
                         for input in inputs {
-                            rt.on_manager_input(input);
+                            rt.on_backend_input(input);
                         }
                         // The window manager has the final say (a locked
                         // pointer stays put): the drawn cursor follows it.
@@ -991,6 +995,7 @@ impl Runtime {
             animation_clock: crate::animation_clock::AnimationClock::real(),
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
+            input_aids: aids::RuntimeAids::default(),
             orca: crate::orca::Reader::new(&session.socket_name),
             pipewire: None,
             casts: Vec::new(),
@@ -1062,7 +1067,7 @@ impl Runtime {
                     Backend::Drm(_) => return,
                 };
                 for input in translate_input(event, area) {
-                    self.on_manager_input(input);
+                    self.on_backend_input(input);
                 }
             }
             WinitEvent::Redraw | WinitEvent::Focus(_) => {}
@@ -1708,6 +1713,7 @@ impl Runtime {
             let pos = self.manager.pointer_pos();
             [pos.x, pos.y]
         }));
+        doc["input_aids"] = self.input_aids_summary();
         doc["pointer_fullscreen_blocked"] = serde_json::json!(
             (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
         );
@@ -2792,6 +2798,7 @@ impl Runtime {
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
         self.triggers.set_right_to_left(settings.right_to_left);
+        self.configure_input_aids(&settings.keyboard_aids, &settings.pointer_aids);
         // Introspect's AnimationsEnabled is GNOME's enable-animations
         // (St): reduced motion keeps it true, as in GNOME 51.
         self.introspect
@@ -2976,6 +2983,7 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        self.poll_input_aids();
         #[cfg(feature = "xwayland")]
         // DISPLAY may be a reserved idle listener. An icon helper must not
         // connect and accidentally activate XWayland before a real client.
@@ -3037,6 +3045,9 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some(click) = outcome.dwell_click {
+            self.set_dwell_click_type(click);
         }
         if let Some(enabled) = outcome.screen_reader {
             #[cfg(feature = "drm")]

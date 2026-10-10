@@ -31,26 +31,26 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 
 | Key | Status | Reason |
 |---|---|---|
-| bouncekeys-beep-reject | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| bouncekeys-delay | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| bouncekeys-enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| disable-timeout | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| feature-state-change-beep | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| mousekeys-accel-time | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| mousekeys-enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| mousekeys-init-delay | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| mousekeys-max-speed | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| slowkeys-beep-accept | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| slowkeys-beep-press | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| slowkeys-beep-reject | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| slowkeys-delay | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| slowkeys-enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| stickykeys-enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| stickykeys-modifier-beep | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| stickykeys-two-key-off | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| timeout-enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| togglekeys-enable | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| bouncekeys-beep-reject | Honored | Bell when a bounce is dropped |
+| bouncekeys-delay | Honored | Live rejection window (G-A11Y-BOUNCE) |
+| bouncekeys-enable | Honored | Compositor input pipeline: a quick repeat of the same key is dropped (G-A11Y-BOUNCE) |
+| disable-timeout | Ignored | GNOME 51's Mutter reads it but never acts on it |
+| enable | Honored | Shift pressed five times switches Sticky Keys, Shift held eight seconds Slow Keys; the shell saves and confirms (G-A11Y-SHORTCUTS) |
+| feature-state-change-beep | Honored | Bell when a keyboard shortcut switches an aid |
+| mousekeys-accel-time | Honored | Mutter's acceleration curve (G-A11Y-MOUSEKEYS) |
+| mousekeys-enable | Honored | Keypad moves and clicks the pointer while Num Lock is off (G-A11Y-MOUSEKEYS) |
+| mousekeys-init-delay | Honored | Delay before repeated motion (G-A11Y-MOUSEKEYS) |
+| mousekeys-max-speed | Honored | Mutter's acceleration curve, pixels per second (G-A11Y-MOUSEKEYS) |
+| slowkeys-beep-accept | Honored | Bell when a held press is accepted |
+| slowkeys-beep-press | Honored | Bell when a press starts waiting |
+| slowkeys-beep-reject | Honored | Bell when a short press is dropped |
+| slowkeys-delay | Honored | Live acceptance delay (G-A11Y-SLOW) |
+| slowkeys-enable | Honored | Compositor input pipeline: presses wait out the delay (G-A11Y-SLOW) |
+| stickykeys-enable | Honored | Compositor input pipeline: a tapped modifier latches, a second tap locks (G-A11Y-STICKY) |
+| stickykeys-modifier-beep | Honored | Bell on each latch or lock change |
+| stickykeys-two-key-off | Honored | Two modifiers at once switch Sticky Keys off (G-A11Y-STICKY) |
+| timeout-enable | Ignored | GNOME 51's Mutter reads it but never acts on it |
+| togglekeys-enable | Honored | Bell on Caps Lock and Num Lock (G-A11Y-SHORTCUTS) |
 ## org.gnome.desktop.a11y.magnifier
 
 | Key | Status | Reason |
@@ -80,17 +80,17 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 
 | Key | Status | Reason |
 |---|---|---|
-| click-type-window-visible | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-click-enabled | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-gesture-double | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-gesture-drag | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-gesture-secondary | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-gesture-single | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-mode | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-threshold | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| dwell-time | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| secondary-click-enabled | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| secondary-click-time | Ignored | Tuna Desktop has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| click-type-window-visible | Ignored | GNOME Shell 51 does not read it either: the chooser follows dwell-click-enabled and dwell-mode |
+| dwell-click-enabled | Honored | Hover click in the compositor's input pipeline, with GNOME's pie timer and panel chooser (G-A11Y-DWELL) |
+| dwell-gesture-double | Honored | Gesture direction for a double click |
+| dwell-gesture-drag | Honored | Gesture direction for a drag |
+| dwell-gesture-secondary | Honored | Gesture direction for a secondary click (G-A11Y-DWELL) |
+| dwell-gesture-single | Honored | Gesture direction for a single click |
+| dwell-mode | Honored | `window` shows the panel's click-type chooser; `gesture` picks the click by direction (G-A11Y-DWELL) |
+| dwell-threshold | Honored | Motion that cancels a dwell or a held secondary click, and a gesture's minimum (G-A11Y-DWELL) |
+| dwell-time | Honored | Live dwell and gesture timeout (G-A11Y-DWELL) |
+| secondary-click-enabled | Honored | A held primary button becomes a secondary click on release (G-A11Y-SECONDARY) |
+| secondary-click-time | Honored | Live hold time (G-A11Y-SECONDARY) |
 ## org.gnome.desktop.app-folders
 
 | Key | Status | Reason |

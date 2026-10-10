@@ -72,6 +72,16 @@
 #   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
 #                  switches), repeat-interval the repeat rate, and
 #                  enable-hot-corners the hot corner (#60)
+#   G-A11Y-STICKY  Sticky Keys: a tapped Shift latches for one key, two
+#                  taps lock, two modifiers at once switch the aid off (#350)
+#   G-A11Y-SHORTCUTS Shift five times / held eight seconds switch Sticky /
+#                  Slow Keys with GNOME's confirmation; Toggle Keys beep
+#   G-A11Y-SLOW    Slow Keys drop short taps and deliver held keys once
+#   G-A11Y-BOUNCE  Bounce Keys drop a repeat within the delay
+#   G-A11Y-MOUSEKEYS the keypad moves (accelerating) and clicks the pointer
+#   G-A11Y-DWELL   hover click: a resting pointer clicks once with GNOME's
+#                  pie timer; gesture mode picks the click by direction
+#   G-A11Y-SECONDARY a held primary button makes a secondary click
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
 #   G-SCREENSHOT   org.gnome.Shell.Screenshot saves the screen as a PNG
@@ -300,6 +310,7 @@ INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 HOT_CORNER_PID=""
 OCCLUSION_PIDS=""
+A11Y_INPUT_PID=""
 IME_PIDS=""
 cleanup() {
     if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
@@ -308,6 +319,7 @@ cleanup() {
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
+    if [ -n "$A11Y_INPUT_PID" ]; then kill "$A11Y_INPUT_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$OCCLUSION_PIDS" ]; then kill $OCCLUSION_PIDS 2>/dev/null || true; fi
     # shellcheck disable=SC2086
@@ -2717,6 +2729,289 @@ gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
     fail G-SETTINGS-INPUT "the keymap did not return to us"
 pass G-SETTINGS-INPUT "input sources, Super+Space, key repeat and the hot corner follow GNOME"
+
+# GNOME's keyboard accessibility aids (#350). Real key events from the
+# host X server pass through the compositor's input pipeline into a
+# recording GTK client; each aid is first shown absent (negative control),
+# then switched on through GNOME's own settings and exercised.
+A11Y_KBD=org.gnome.desktop.a11y.keyboard
+A11Y_KEYS="$ARTIFACTS/a11y-input.json"
+rm -f "$A11Y_KEYS"
+gsettings reset-recursively "$A11Y_KBD"
+WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-a11y-input-window.py" "$A11Y_KEYS" >"$ARTIFACTS/a11y-input.log" 2>&1 &
+A11Y_INPUT_PID=$!
+cstate '.focused_app_id == "org.tuna.A11yInputProof"' "a11y recorder focused" ||
+    fail G-A11Y-STICKY "the recording GTK window did not map focused"
+[ -s "$A11Y_KEYS" ] || sleep 1
+# Wait for the recorder to satisfy a jq expression.
+a11y_wait() {
+    end=$(($(date +%s) + ${3:-10}))
+    while [ "$(date +%s)" -le "$end" ]; do
+        [ -s "$A11Y_KEYS" ] && jq -e "$1" "$A11Y_KEYS" >/dev/null 2>&1 && return 0
+        sleep 0.2
+    done
+    echo "tuna-gtk-shell-proof: a11y recorder ($2) was:" >&2
+    cat "$A11Y_KEYS" >&2 2>/dev/null || true
+    return 1
+}
+# Printable presses (modifiers have keyvals >= 0xff00) since mark $1, as
+# "keyval:shift" strings.
+a11y_typed() {
+    echo "[.presses[$1:][] | select(.keyval < 65280) | \"\\(.keyval):\\(.shift)\"]"
+}
+a11y_mark() { jq '.presses | length' "$A11Y_KEYS"; }
+
+# Sticky Keys. Without the aid a tapped Shift is spent at once.
+mark="$(a11y_mark)"
+xdotool key Shift_L
+xdotool key a
+a11y_wait "$(a11y_typed "$mark") == [\"97:false\"]" "plain shift tap" ||
+    fail G-A11Y-STICKY "without Sticky Keys a Shift tap should not change the next key"
+gsettings set "$A11Y_KBD" stickykeys-enable true
+cstate '.input_aids.sticky' "sticky on" || fail G-A11Y-STICKY "stickykeys-enable did not reach the compositor"
+mark="$(a11y_mark)"
+xdotool key Shift_L
+cstate '.input_aids.latched == ["shift"]' "shift latched" || fail G-A11Y-STICKY "a Shift tap did not latch"
+xdotool key a
+xdotool key b
+a11y_wait "$(a11y_typed "$mark") == [\"65:true\",\"98:false\"]" "latched shift" ||
+    fail G-A11Y-STICKY "the latched Shift did not apply to exactly one key"
+cstate '.input_aids.latched == [] and .seat_pressed_key_count == 0' "latch spent" ||
+    fail G-A11Y-STICKY "the latched Shift was not released after one key"
+# Two taps lock, a third releases.
+mark="$(a11y_mark)"
+xdotool key Shift_L
+xdotool key Shift_L
+cstate '.input_aids.locked == ["shift"]' "shift locked" || fail G-A11Y-STICKY "a second Shift tap did not lock"
+xdotool key a
+xdotool key b
+xdotool key Shift_L
+cstate '.input_aids.locked == []' "shift unlocked" || fail G-A11Y-STICKY "a third Shift tap did not unlock"
+xdotool key c
+a11y_wait "$(a11y_typed "$mark") == [\"65:true\",\"66:true\",\"99:false\"]" "locked shift" ||
+    fail G-A11Y-STICKY "the locked Shift did not hold across keys and release on the third tap"
+cp "$A11Y_KEYS" "$ARTIFACTS/a11y-sticky.json"
+# stickykeys-two-key-off: two modifiers at once switch the aid off, the
+# shell saves it and shows GNOME's confirmation; Enter keeps it off.
+gsettings set "$A11Y_KBD" stickykeys-two-key-off true
+sleep 0.5
+xdotool keydown Control_L keydown Alt_L
+xdotool keyup Alt_L keyup Control_L
+cstate '(.input_aids.sticky | not) and any(.layers[]; .namespace == "tuna-kbd-a11y")' "two keys off" ||
+    fail G-A11Y-STICKY "two modifiers at once did not switch Sticky Keys off and confirm"
+[ "$(gsettings get "$A11Y_KBD" stickykeys-enable)" = false ] ||
+    fail G-A11Y-STICKY "the shell did not save stickykeys-enable false"
+scrot "$ARTIFACTS/a11y-sticky-off-dialog.png" >/dev/null
+xdotool key Return
+cstate 'all(.layers[]; .namespace != "tuna-kbd-a11y")' "dialog closed" ||
+    fail G-A11Y-STICKY "Leave Off did not close the confirmation"
+[ "$(gsettings get "$A11Y_KBD" stickykeys-enable)" = false ] ||
+    fail G-A11Y-STICKY "Leave Off did not keep Sticky Keys off"
+pass G-A11Y-STICKY "a tapped Shift latches for one key, two taps lock, and two modifiers at once switch the aid off with GNOME's confirmation"
+
+# Keyboard shortcuts (enable): Shift five times switches Sticky Keys on.
+gsettings set "$A11Y_KBD" enable true
+gsettings set "$A11Y_KBD" togglekeys-enable true
+cstate '.input_aids.shortcuts' "shortcuts on" || fail G-A11Y-SHORTCUTS "enable did not reach the compositor"
+for _ in 1 2 3 4 5; do xdotool key Shift_L; sleep 0.1; done
+cstate '.input_aids.sticky and any(.layers[]; .namespace == "tuna-kbd-a11y")' "shift five times" ||
+    fail G-A11Y-SHORTCUTS "Shift pressed five times did not switch Sticky Keys on"
+scrot "$ARTIFACTS/a11y-sticky-on-dialog.png" >/dev/null
+[ "$(gsettings get "$A11Y_KBD" stickykeys-enable)" = true ] ||
+    fail G-A11Y-SHORTCUTS "the shell did not save stickykeys-enable true"
+xdotool key Return
+cstate 'all(.layers[]; .namespace != "tuna-kbd-a11y")' "leave on" ||
+    fail G-A11Y-SHORTCUTS "Leave On did not close the confirmation"
+gsettings set "$A11Y_KBD" stickykeys-enable false
+cstate '(.input_aids.sticky | not)' "sticky off" || fail G-A11Y-SHORTCUTS "stickykeys-enable false did not apply"
+# Toggle Keys: Caps Lock and Num Lock beep (twice each restores them).
+bells="$(jq '.input_aids.bells' "$CSTATE")"
+xdotool key Caps_Lock Caps_Lock
+cstate ".input_aids.bells >= $((bells + 2))" "toggle beeps" ||
+    fail G-A11Y-SHORTCUTS "togglekeys-enable did not beep for Caps Lock"
+# Shift held eight seconds switches Slow Keys on.
+xdotool keydown Shift_L
+sleep 9
+cstate '.input_aids.slow and any(.layers[]; .namespace == "tuna-kbd-a11y")' "shift held" ||
+    { xdotool keyup Shift_L; fail G-A11Y-SHORTCUTS "Shift held eight seconds did not switch Slow Keys on"; }
+xdotool keyup Shift_L
+[ "$(gsettings get "$A11Y_KBD" slowkeys-enable)" = true ] ||
+    fail G-A11Y-SHORTCUTS "the shell did not save slowkeys-enable true"
+# Slow Keys now apply: Turn Off needs Escape held past the delay.
+xdotool keydown Escape
+sleep 0.8
+xdotool keyup Escape
+cstate '(.input_aids.slow | not) and all(.layers[]; .namespace != "tuna-kbd-a11y")' "turn off" ||
+    fail G-A11Y-SHORTCUTS "Turn Off did not switch Slow Keys back off"
+gsettings set "$A11Y_KBD" enable false
+gsettings set "$A11Y_KBD" togglekeys-enable false
+pass G-A11Y-SHORTCUTS "Shift five times and Shift held eight seconds switch Sticky and Slow Keys with GNOME's confirmation; Toggle Keys beep"
+
+# Slow Keys: a quick tap is dropped, a held key arrives once.
+gsettings set "$A11Y_KBD" slowkeys-delay 600
+gsettings set "$A11Y_KBD" slowkeys-enable true
+cstate '.input_aids.slow' "slow on" || fail G-A11Y-SLOW "slowkeys-enable did not reach the compositor"
+mark="$(a11y_mark)"
+rejected="$(jq '.input_aids.slow_rejected' "$CSTATE")"
+xdotool key a
+cstate ".input_aids.slow_rejected == $((rejected + 1))" "tap rejected" ||
+    fail G-A11Y-SLOW "a tap shorter than the delay was not rejected"
+xdotool keydown b
+sleep 1
+xdotool keyup b
+a11y_wait "$(a11y_typed "$mark") == [\"98:false\"]" "held key" ||
+    fail G-A11Y-SLOW "Slow Keys did not deliver only the key held past the delay"
+gsettings set "$A11Y_KBD" slowkeys-enable false
+cstate '(.input_aids.slow | not)' "slow off" || fail G-A11Y-SLOW "slowkeys-enable false did not apply"
+mark="$(a11y_mark)"
+xdotool key a
+a11y_wait "$(a11y_typed "$mark") == [\"97:false\"]" "slow off" ||
+    fail G-A11Y-SLOW "a tap was not delivered with Slow Keys off"
+pass G-A11Y-SLOW "Slow Keys drop a tap shorter than slowkeys-delay and deliver a held key once"
+
+# Bounce Keys: a key pressed again within the delay is ignored.
+mark="$(a11y_mark)"
+xdotool key a
+sleep 0.1
+xdotool key a
+a11y_wait "$(a11y_typed "$mark") == [\"97:false\",\"97:false\"]" "no bounce" ||
+    fail G-A11Y-BOUNCE "without Bounce Keys both presses should arrive"
+gsettings set "$A11Y_KBD" bouncekeys-delay 700
+gsettings set "$A11Y_KBD" bouncekeys-enable true
+cstate '.input_aids.bounce' "bounce on" || fail G-A11Y-BOUNCE "bouncekeys-enable did not reach the compositor"
+mark="$(a11y_mark)"
+xdotool key a
+sleep 0.1
+xdotool key a
+sleep 1
+xdotool key a
+a11y_wait "$(a11y_typed "$mark") == [\"97:false\",\"97:false\"]" "bounce" ||
+    fail G-A11Y-BOUNCE "the quick repeat was not dropped, or the later press was"
+cstate '.input_aids.bounce_rejected >= 1' "bounce counted" || fail G-A11Y-BOUNCE "no bounce was rejected"
+gsettings set "$A11Y_KBD" bouncekeys-enable false
+pass G-A11Y-BOUNCE "a repeat within bouncekeys-delay is dropped; a later press arrives"
+
+# Mouse Keys: the keypad moves the pointer and clicks.
+a11y_rect="$(jq -c '.focused_rect' "$CSTATE")"
+a11y_cx="$(echo "$a11y_rect" | jq '.[0] + (.[2] / 2 | floor)')"
+a11y_cy="$(echo "$a11y_rect" | jq '.[1] + (.[3] / 2 | floor)')"
+xdotool mousemove --window "$WID" "$a11y_cx" "$a11y_cy"
+cstate ".pointer_position == [$a11y_cx, $a11y_cy]" "pointer on recorder" ||
+    fail G-A11Y-MOUSEKEYS "the pointer did not reach the recording window"
+xdotool keydown KP_Right
+sleep 0.6
+xdotool keyup KP_Right
+sleep 0.3
+cstate ".pointer_position == [$a11y_cx, $a11y_cy]" "keypad without mouse keys" ||
+    fail G-A11Y-MOUSEKEYS "the keypad moved the pointer without Mouse Keys"
+gsettings set "$A11Y_KBD" mousekeys-max-speed 1000
+gsettings set "$A11Y_KBD" mousekeys-accel-time 300
+gsettings set "$A11Y_KBD" mousekeys-init-delay 100
+gsettings set "$A11Y_KBD" mousekeys-enable true
+cstate '.input_aids.mouse' "mouse keys on" || fail G-A11Y-MOUSEKEYS "mousekeys-enable did not reach the compositor"
+xdotool keydown KP_Right
+sleep 0.8
+xdotool keyup KP_Right
+cstate ".pointer_position[0] >= $((a11y_cx + 60)) and .pointer_position[1] == $a11y_cy" "pointer moved right" ||
+    fail G-A11Y-MOUSEKEYS "holding keypad 6 did not accelerate the pointer right"
+moved="$(jq -c '.pointer_position' "$CSTATE")"
+sleep 0.5
+cstate ".pointer_position == $moved" "pointer stopped" ||
+    fail G-A11Y-MOUSEKEYS "the pointer kept moving after the key was released"
+# The host pointer never left the center, so return one pixel aside:
+# a move to where it already is sends no motion.
+xdotool mousemove --window "$WID" $((a11y_cx + 1)) "$a11y_cy"
+cstate ".pointer_position == [$((a11y_cx + 1)), $a11y_cy]" "pointer back on recorder" ||
+    fail G-A11Y-MOUSEKEYS "the pointer did not return to the recording window"
+buttons="$(jq '.buttons | length' "$A11Y_KEYS")"
+xdotool key KP_Begin
+a11y_wait "(.buttons | length) == $((buttons + 1)) and .buttons[-1].button == 1" "keypad click" ||
+    fail G-A11Y-MOUSEKEYS "keypad 5 did not click the primary button"
+xdotool key KP_Subtract KP_Begin
+a11y_wait "(.buttons | length) == $((buttons + 2)) and .buttons[-1].button == 3" "keypad secondary" ||
+    fail G-A11Y-MOUSEKEYS "keypad - then 5 did not click the secondary button"
+cp "$A11Y_KEYS" "$ARTIFACTS/a11y-mousekeys.json"
+gsettings set "$A11Y_KBD" mousekeys-enable false
+cstate '(.input_aids.mouse | not) and .input_aids.mouse_buttons_down == 0' "mouse keys off" ||
+    fail G-A11Y-MOUSEKEYS "mousekeys-enable false did not apply"
+pass G-A11Y-MOUSEKEYS "keypad 6 accelerates the pointer and stops on release; 5 clicks, - picks the secondary button"
+
+# Pointer aids (org.gnome.desktop.a11y.mouse) on the same recorder: real
+# host pointer motion and buttons through the compositor.
+A11Y_MOUSE=org.gnome.desktop.a11y.mouse
+gsettings reset-recursively "$A11Y_MOUSE"
+a11y_buttons() { jq '.buttons | length' "$A11Y_KEYS"; }
+# Hover click: without it a resting pointer clicks nothing.
+xdotool mousemove --window "$WID" "$a11y_cx" "$a11y_cy"
+buttons="$(a11y_buttons)"
+sleep 2
+[ "$(a11y_buttons)" = "$buttons" ] || fail G-A11Y-DWELL "a resting pointer clicked without hover click"
+gsettings set "$A11Y_MOUSE" dwell-time 0.8
+gsettings set "$A11Y_MOUSE" dwell-click-enabled true
+cstate '.input_aids.pointer.dwell_click' "dwell on" || fail G-A11Y-DWELL "dwell-click-enabled did not reach the compositor"
+xdotool mousemove --window "$WID" $((a11y_cx - 30)) "$a11y_cy"
+cstate 'any(.layers[]; .namespace == "tuna-pointer-a11y")' "pie timer" 5 ||
+    fail G-A11Y-DWELL "the pie timer did not show while the pointer dwelled"
+scrot "$ARTIFACTS/a11y-dwell-pie.png" >/dev/null
+a11y_wait "(.buttons | length) == $((buttons + 1)) and .buttons[-1].button == 1" "dwell click" ||
+    fail G-A11Y-DWELL "resting the pointer did not make one primary click"
+sleep 2
+[ "$(a11y_buttons)" = "$((buttons + 1))" ] || fail G-A11Y-DWELL "a still pointer clicked more than once"
+cstate 'all(.layers[]; .namespace != "tuna-pointer-a11y")' "pie gone" ||
+    fail G-A11Y-DWELL "the pie timer stayed after the click"
+# Gesture mode: after the dwell, moving right picks GNOME's default
+# secondary click, made back where the pointer dwelled.
+gsettings set "$A11Y_MOUSE" dwell-mode gesture
+cstate '.input_aids.pointer.dwell_gesture' "gesture mode" || fail G-A11Y-DWELL "dwell-mode gesture did not apply"
+gesture_x=$((a11y_cx - 80))
+xdotool mousemove --window "$WID" "$gesture_x" "$a11y_cy"
+cstate '.input_aids.pointer.gesture' "gesture open" 6 ||
+    fail G-A11Y-DWELL "the dwell did not open the direction gesture"
+xdotool mousemove --window "$WID" $((gesture_x + 40)) "$a11y_cy"
+a11y_wait "(.buttons | length) == $((buttons + 2)) and .buttons[-1].button == 3" "gesture secondary" ||
+    fail G-A11Y-DWELL "moving right after the dwell did not make a secondary click"
+cstate ".pointer_position == [$gesture_x, $a11y_cy]" "click where it dwelled" ||
+    fail G-A11Y-DWELL "the gesture click was not made where the pointer dwelled"
+cp "$A11Y_KEYS" "$ARTIFACTS/a11y-dwell.json"
+gsettings set "$A11Y_MOUSE" dwell-click-enabled false
+cstate '(.input_aids.pointer.dwell_click | not)' "dwell off" || fail G-A11Y-DWELL "dwell-click-enabled false did not apply"
+pass G-A11Y-DWELL "a resting pointer clicks once after dwell-time with GNOME's pie timer; a gesture picks the click by direction"
+
+# Simulated secondary click: a held primary button becomes a secondary
+# click on release; a quick click stays a plain click.
+xdotool mousemove --window "$WID" "$a11y_cx" "$a11y_cy"
+buttons="$(a11y_buttons)"
+xdotool mousedown 1
+sleep 1.2
+xdotool mouseup 1
+a11y_wait "(.buttons | length) == $((buttons + 1)) and .buttons[-1].button == 1" "held without the aid" ||
+    fail G-A11Y-SECONDARY "without the aid a held press should stay a primary click"
+gsettings set "$A11Y_MOUSE" secondary-click-time 0.6
+gsettings set "$A11Y_MOUSE" secondary-click-enabled true
+cstate '.input_aids.pointer.secondary_click' "secondary on" ||
+    fail G-A11Y-SECONDARY "secondary-click-enabled did not reach the compositor"
+xdotool mousedown 1
+sleep 0.1
+xdotool mouseup 1
+a11y_wait "(.buttons | length) == $((buttons + 2)) and .buttons[-1].button == 1" "quick click" ||
+    fail G-A11Y-SECONDARY "a quick click did not stay a primary click"
+xdotool mousedown 1
+sleep 1.2
+xdotool mouseup 1
+a11y_wait "(.buttons | length) == $((buttons + 4)) and .buttons[-2].button == 1 and .buttons[-1].button == 3" "held click" ||
+    fail G-A11Y-SECONDARY "holding the primary button did not make a secondary click"
+sleep 0.5
+[ "$(a11y_buttons)" = "$((buttons + 4))" ] || fail G-A11Y-SECONDARY "the held click made extra clicks"
+gsettings set "$A11Y_MOUSE" secondary-click-enabled false
+pass G-A11Y-SECONDARY "holding the primary button for secondary-click-time makes a secondary click"
+gsettings reset-recursively "$A11Y_MOUSE"
+
+gsettings reset-recursively "$A11Y_KBD"
+kill "$A11Y_INPUT_PID" 2>/dev/null || true
+A11Y_INPUT_PID=""
+cstate 'all(.windows[]; .app_id != "org.tuna.A11yInputProof")' "a11y recorder closed" ||
+    fail G-A11Y-MOUSEKEYS "the recording window did not unmap"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 
 # Disabling animations is live and snaps compositor and GTK transitions.
 gsettings set org.gnome.desktop.interface enable-animations false

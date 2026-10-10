@@ -267,6 +267,8 @@ pub struct Session<'a> {
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<tuna_shell_control::InputSettings>,
     screen_reader: Option<bool>,
+    /// The hover-click chooser's latest pick, drained by the hub.
+    dwell_click: Option<tuna_shell_control::DwellClick>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
     /// The switcher's thumbnail frames, when the shell sent new ones.
@@ -340,6 +342,7 @@ impl<'a> Session<'a> {
             unlock_pending: None,
             input_settings: None,
             screen_reader: None,
+            dwell_click: None,
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
             switcher_keys: None,
@@ -584,6 +587,17 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::SetDwellClickType { click },
+            } => {
+                self.dwell_click = Some(click);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::SetScreenReader { enabled },
             } => {
                 self.screen_reader = Some(enabled);
@@ -755,6 +769,9 @@ impl<'a> Session<'a> {
             | Message::WorkspacePopup { .. }
             | Message::PointerOutput { .. }
             | Message::ScreenReader { .. }
+            | Message::KeyboardAidToggled { .. }
+            | Message::DwellClickType { .. }
+            | Message::PointerTimeout { .. }
             | Message::ShortcutConsent { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
@@ -800,6 +817,9 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::PointerOutput { .. } => "PointerOutput",
         Message::ShortcutConsent { .. } => "ShortcutConsent",
         Message::ScreenReader { .. } => "ScreenReader",
+        Message::KeyboardAidToggled { .. } => "KeyboardAidToggled",
+        Message::DwellClickType { .. } => "DwellClickType",
+        Message::PointerTimeout { .. } => "PointerTimeout",
     }
 }
 
@@ -961,6 +981,7 @@ fn apply_command(
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
         | CommandKind::SetScreenReader { .. }
+        | CommandKind::SetDwellClickType { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -997,6 +1018,8 @@ pub struct PollOutcome {
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<tuna_shell_control::InputSettings>,
     pub screen_reader: Option<bool>,
+    /// The hover-click chooser's pick, if the shell sent one.
+    pub dwell_click: Option<tuna_shell_control::DwellClick>,
     /// Accelerator grabs the shell sent, if they changed.
     pub accelerators: Option<Vec<tuna_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
@@ -1424,6 +1447,9 @@ impl ControlHub {
                     }
                     if let Some(enabled) = session.screen_reader.take() {
                         outcome.screen_reader = Some(enabled);
+                    }
+                    if let Some(click) = session.dwell_click.take() {
+                        outcome.dwell_click = Some(click);
                     }
                     true
                 } else {
