@@ -53,6 +53,13 @@ and application data are preserved. Uninstalling removes the Tuna Desktop-owned
 program files and the session entry; user configuration and application data
 are preserved.
 
+## Recovering from a bad release
+
+If a release already tagged, built, or published turns out to be wrong, see
+[docs/release-rollback.md](release-rollback.md) for the recovery steps —
+there is no automated rollback, so this is a manual process ordered by how
+far the bad release already traveled.
+
 ## Release notes template
 
 ```markdown
