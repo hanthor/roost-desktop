@@ -290,6 +290,8 @@ pub struct WindowManager {
     strip_shown: f64,
     animations_enabled: bool,
     column_animations: HashMap<u64, crate::animation::ColumnSpring>,
+    /// Open/close effects and modal dimming (window_effects.rs).
+    effects: crate::window_effects::WindowEffects,
     /// The running view spring and its elapsed seconds, while the drawn
     /// view has not settled on the target.
     strip_anim: Option<(crate::spring::Spring, f64)>,
@@ -359,6 +361,7 @@ impl WindowManager {
             strip_shown: 0.0,
             animations_enabled: true,
             column_animations: HashMap::new(),
+            effects: Default::default(),
             strip_anim: None,
             workspace_slide: Default::default(),
             super_held: false,
@@ -728,6 +731,22 @@ impl WindowManager {
             .map_or(0, |placement| placement.dx)
     }
 
+    /// How a window on `workspace` is drawn this frame, as (x offset,
+    /// alpha) — moved and faded with a running workspace switch — or
+    /// `None` when that workspace is not shown. For windows that left
+    /// the model (closing effects), so it reads no window entry.
+    pub fn workspace_placement(&self, workspace: u32, sticky: bool) -> Option<(i32, f32)> {
+        if sticky {
+            return Some((0, 1.0));
+        }
+        if !self.workspace_slide.running() {
+            return (workspace == self.model.active_workspace()).then_some((0, 1.0));
+        }
+        self.workspace_slide
+            .frame_placement(workspace)
+            .map(|placement| (placement.dx, placement.alpha))
+    }
+
     /// Where `id` is drawn this frame (see
     /// [`render_windows`](Self::render_windows)).
     pub fn render_geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
@@ -863,6 +882,7 @@ impl WindowManager {
         }
         // Discard destruction records for roles that never entered the model.
         state.closed_toplevel_parents.clear();
+        state.closing_snapshots.clear();
         #[cfg(feature = "xwayland")]
         self.drain_x11_events(state);
         #[cfg(feature = "xwayland")]
@@ -1048,6 +1068,7 @@ impl WindowManager {
             self.apply_layout(state, id, WindowLayout::Strip);
         }
         self.configure(id, true);
+        self.effects.mapped(id);
         // A window mapping while the overview holds focus (launched
         // from search or the dash) is the one focused when it closes,
         // as in GNOME; otherwise the pre-overview window would win.
@@ -1421,6 +1442,7 @@ impl WindowManager {
                         .get(parent)
                         .is_some_and(|window| window.surface.alive())
             });
+        let leaving = self.leaving(state, id);
         if let Some(window) = self.windows.remove(&id) {
             eprintln!("tuna-compositor: window {id} unmapped");
             match window.surface.underlying_surface() {
@@ -1436,6 +1458,10 @@ impl WindowManager {
         }
         self.stacking.retain(|other| *other != id);
         self.model.remove(id);
+        match leaving {
+            Some(leaving) => self.effects.closed(leaving),
+            None => self.effects.forget(id),
+        }
         for window in self.windows.values_mut() {
             if window.x11_parent == Some(id) {
                 window.x11_parent = None;
@@ -1556,13 +1582,7 @@ impl WindowManager {
                 let Some(w) = self.windows.get(child) else {
                     return false;
                 };
-                let modal = w.x11_parent.is_some()
-                    || match w.surface.underlying_surface() {
-                        WindowSurface::Wayland(toplevel) => read_modal(toplevel),
-                        #[cfg(feature = "xwayland")]
-                        WindowSurface::X11(_) => false,
-                    };
-                !w.minimized && modal && self.transient_parent(*child) == Some(id)
+                !w.minimized && is_modal(w) && self.transient_parent(*child) == Some(id)
             });
             match dialog {
                 Some(child) => id = child,
@@ -3527,6 +3547,92 @@ impl WindowManager {
     pub fn geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
         self.windows.get(&id).map(|w| w.geometry)
     }
+
+    /// Window open/close and dim effects (window_effects.rs).
+    pub fn window_effects(&self) -> &crate::window_effects::WindowEffects {
+        &self.effects
+    }
+
+    pub fn window_effects_mut(&mut self) -> &mut crate::window_effects::WindowEffects {
+        &mut self.effects
+    }
+
+    /// Advance window effects `dt` seconds: windows that drew their
+    /// first buffer start opening, and parents of attached modal
+    /// dialogs dim. `hold` keeps new windows waiting (GNOME starts a
+    /// map effect once a closing overview has gone). Returns whether
+    /// any effect still runs.
+    pub fn step_window_effects(&mut self, dt: f64, hold: bool) -> bool {
+        use crate::window_effects::WindowType;
+        for id in self.effects.pending() {
+            let Some(window) = self.windows.get(&id) else {
+                self.effects.forget(id);
+                continue;
+            };
+            let shown = window.surface.wl_surface().is_some_and(|surface| {
+                smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |s| {
+                    s.buffer().is_some()
+                })
+                .unwrap_or(false)
+            });
+            if shown && !hold {
+                let kind = if self.transient_parent(id).is_some() {
+                    WindowType::Dialog
+                } else {
+                    WindowType::Normal
+                };
+                self.effects.shown(id, kind);
+            }
+        }
+        let parents = self
+            .windows
+            .iter()
+            .filter(|(_, w)| !w.minimized && is_modal(w))
+            .filter_map(|(id, _)| self.transient_parent(*id))
+            .collect();
+        self.effects.set_dimmed(&parents);
+        self.effects.step(dt)
+    }
+
+    /// What the close effect needs of window `id` before it leaves.
+    fn leaving(&self, state: &mut State, id: u64) -> Option<crate::window_effects::Leaving> {
+        use crate::window_effects::WindowType;
+        let window = self.windows.get(&id)?;
+        let surface = window.surface.wl_surface().map(|s| s.into_owned());
+        let dialog = window.x11_parent.is_some()
+            || self.transient_parent(id).is_some()
+            || surface
+                .as_ref()
+                .is_some_and(|s| state.closed_toplevel_parents.contains_key(s));
+        let index = self.stacking.iter().position(|other| *other == id)?;
+        // An X11 window unmaps with its surface still alive.
+        if let Some(live) = surface.as_ref().filter(|s| s.is_alive()) {
+            state.closing_snapshots.capture(live);
+        }
+        Some(crate::window_effects::Leaving {
+            id,
+            kind: if dialog {
+                WindowType::Dialog
+            } else {
+                WindowType::Normal
+            },
+            workspace: self.model.window(id)?.workspace,
+            sticky: window.sticky,
+            above: index.checked_sub(1).map(|i| self.stacking[i]),
+            geometry: self.render_geometry(id)?,
+            snapshot: surface.and_then(|s| state.closing_snapshots.take(&s)),
+        })
+    }
+}
+
+/// An attached modal dialog: xdg-dialog modal, or an X11 transient.
+fn is_modal(w: &ManagedWindow) -> bool {
+    w.x11_parent.is_some()
+        || match w.surface.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => read_modal(toplevel),
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(_) => false,
+        }
 }
 
 /// Read the client's current title from the toplevel role data.

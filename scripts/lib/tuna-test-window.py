@@ -7,7 +7,10 @@ Maps one Adw.ApplicationWindow titled TITLE with a header bar, a big
 label, a menu button whose popover proves xdg popups, and a scrollable
 list that proves wheel scrolling. Exits when the window closes. With
 TUNA_TEST_POPOVER=1 the popover opens by itself once the window shows
-(parity captures cannot rely on headless input).
+(parity captures cannot rely on headless input). TUNA_TEST_REQUESTS
+names a JSON file of window requests; besides the window states,
+"dialog" opens a modal dialog over the window, "undialog" destroys it
+and "close" destroys the window (cleanly, before exiting).
 """
 import os
 import sys
@@ -64,13 +67,33 @@ def build(loop):
     win.present()
     if request_path := os.environ.get("TUNA_TEST_REQUESTS"):
         handled = [-1]
+        dialog = [None]
+
+        def open_dialog():
+            dialog[0] = Gtk.Window(title=TITLE + " Dialog", transient_for=win, modal=True)
+            dialog[0].set_default_size(320, 200)
+            dialog[0].set_child(Gtk.Label(label="Dialog"))
+            dialog[0].present()
+
+        def close_dialog():
+            if dialog[0] is not None:
+                dialog[0].destroy()
+                dialog[0] = None
+
+        def close_window():
+            win.destroy()
+            # Let the destroy requests reach the compositor first.
+            GLib.timeout_add(500, lambda: loop.quit() or False)
+
         def request():
             try:
                 data = json.loads(Path(request_path).read_text())
                 generation = data["generation"]
                 if generation != handled[0]:
                     actions = {"fullscreen": win.fullscreen, "unfullscreen": win.unfullscreen,
-                               "maximize": win.maximize, "unmaximize": win.unmaximize}
+                               "maximize": win.maximize, "unmaximize": win.unmaximize,
+                               "dialog": open_dialog, "undialog": close_dialog,
+                               "close": close_window}
                     actions[data["request"]]()
                     handled[0] = generation
                     Path(request_path + ".ack").write_text(str(generation))

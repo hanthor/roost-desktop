@@ -131,6 +131,16 @@
 #                  the right one unlocks through PAM (pam_wrapper)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
+#   G-WINDOW-OPEN-ANIM a new window eases in as GNOME 51 maps it (150 ms;
+#                  an attached dialog unfolds over 100 ms)
+#   G-MODAL-DIM    a modal dialog dims its parent over 500 ms; it undims
+#                  over 250 ms when the dialog goes
+#   G-WINDOW-CLOSE-ANIM closing windows play GNOME's destroy effect from
+#                  their last frame, out of the model (no input)
+#   G-WINDOW-ANIM-OFF with enable-animations off all of these are instant
+#   G-WINDOW-ANIM-SAMPLED on the proof clock, exact midpoints at 75 ms and
+#                  settles at 150 ms
+#   G-WINDOW-ANIM-REDUCED reduced motion keeps fades and dims, drops scale
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
 
 #   G-APP-DRAG  dragging an app's header bar moves the window (#58)
@@ -2836,6 +2846,147 @@ rm -f "$TUNA_ANIMATION_CLOCK"
 cstate '.animation_clock_manual | not' "real clock" ||
     fail G-ANIMATION-CLOCK "removing the clock file did not resume real time"
 pass G-ANIMATION-CLOCK "a proof-driven clock freezes compositor animation time and samples the overview's out-sine opening and out-quad closing at exact 125/250 ms delays"
+
+# Window open/close and modal dim (#494, #498): GNOME 51's effects drawn
+# as compositor transforms. The compositor logs each finished effect
+# with GNOME's duration, the wall time it took to settle and the frames
+# drawn mid-effect; polling cannot see a 150 ms effect, the log can.
+FX_REQUESTS="$ARTIFACTS/window-effects-requests.json"
+fx_near='def near(a; b): ((a - b) * (a - b)) < 0.000001;'
+fx_generation=0
+fx_request() {
+    fx_generation=$((fx_generation + 1))
+    printf '{"generation":%s,"request":"%s"}\n' "$fx_generation" "$1" >"$FX_REQUESTS"
+    end=$(($(date +%s) + 10))
+    until [ "$(cat "$FX_REQUESTS.ack" 2>/dev/null)" = "$fx_generation" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
+    [ "$(cat "$FX_REQUESTS.ack" 2>/dev/null)" = "$fx_generation" ] || fail "$2" "client request $1 not acknowledged"
+}
+# Effects settle within GNOME's duration plus this much (CI frame time).
+FX_TOLERANCE_MS=300
+fx_window() {
+    rm -f "$FX_REQUESTS" "$FX_REQUESTS.ack"
+    fx_generation=0
+    WAYLAND_DISPLAY="$SOCKET_NAME" TUNA_TEST_REQUESTS="$FX_REQUESTS" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "$1" '#2060a0' >"$ARTIFACTS/window-effects-$2.log" 2>&1 &
+    FX_PID=$!
+    fx_app="tuna-test-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    cstate "[.windows[] | select(.app_id == \"$fx_app\")] | length == 1" "$1 mapped" ||
+        fail "$3" "$1 did not map"
+    FX_ID="$(jq ".windows[] | select(.app_id == \"$fx_app\") | .id" "$CSTATE")"
+}
+fx_log() {
+    cstate "$fx_near [.window_effects.finished[] | select($1)] | length > 0" "$2"
+}
+fx_window "Effects Proof" on G-WINDOW-OPEN-ANIM
+fx_log ".id == $FX_ID and .what == \"open\" and .kind == \"normal\" and .duration_ms == 150 and .frames >= 1 and .settled_ms >= 150 and .settled_ms <= 150 + $FX_TOLERANCE_MS" "open effect settled" ||
+    fail G-WINDOW-OPEN-ANIM "the window did not ease in over GNOME's 150 ms"
+cp "$CSTATE" "$ARTIFACTS/window-effects-open.json"
+pass G-WINDOW-OPEN-ANIM "a new window scales and fades in from its bottom centre over 150 ms"
+fx_request dialog G-MODAL-DIM
+fx_dialog="([.windows[] | select(.app_id == \"tuna-test-effects proof\") | .id] | max)"
+cstate "$fx_dialog != $FX_ID" "dialog mapped" || fail G-MODAL-DIM "the modal dialog did not map"
+FX_DIALOG="$(jq "$fx_dialog" "$CSTATE")"
+fx_log ".id == $FX_DIALOG and .what == \"open\" and .kind == \"dialog\" and .duration_ms == 100 and .frames >= 1 and .settled_ms <= 100 + $FX_TOLERANCE_MS" "dialog open effect" ||
+    fail G-WINDOW-OPEN-ANIM "the attached dialog did not unfold over GNOME's 100 ms"
+fx_log ".id == $FX_ID and .what == \"dim\" and .duration_ms == 500 and .frames >= 1 and .settled_ms >= 500 and .settled_ms <= 500 + $FX_TOLERANCE_MS" "parent dimmed" ||
+    fail G-MODAL-DIM "the parent did not dim over GNOME's 500 ms"
+cstate ".window_effects.dimmed | any(.id == $FX_ID and (.brightness - 0.7) * (.brightness - 0.7) < 0.000001)" "parent held dim" ||
+    fail G-MODAL-DIM "the parent did not hold GNOME's dimmed brightness"
+scrot "$ARTIFACTS/window-effects-dimmed.png" >/dev/null 2>&1 || true
+cp "$CSTATE" "$ARTIFACTS/window-effects-dimmed.json"
+fx_request undialog G-MODAL-DIM
+fx_log ".id == $FX_DIALOG and .what == \"close\" and .kind == \"dialog\" and .duration_ms == 100 and .frames >= 1 and .settled_ms <= 100 + $FX_TOLERANCE_MS" "dialog close effect" ||
+    fail G-WINDOW-CLOSE-ANIM "the attached dialog did not fold away over GNOME's 100 ms"
+fx_log ".id == $FX_ID and .what == \"undim\" and .duration_ms == 250 and .frames >= 1 and .settled_ms <= 250 + $FX_TOLERANCE_MS" "parent undimmed" ||
+    fail G-MODAL-DIM "the parent did not undim over GNOME's 250 ms"
+cstate ".window_effects.dimmed | all(.id != $FX_ID)" "parent restored" ||
+    fail G-MODAL-DIM "the parent stayed dimmed"
+pass G-MODAL-DIM "the parent dims to 70% over 500 ms behind its modal dialog and undims over 250 ms"
+fx_request close G-WINDOW-CLOSE-ANIM
+fx_log ".id == $FX_ID and .what == \"close\" and .kind == \"normal\" and .duration_ms == 150 and .frames >= 1 and .settled_ms <= 150 + $FX_TOLERANCE_MS" "close effect settled" ||
+    fail G-WINDOW-CLOSE-ANIM "the closing window did not fade and shrink over GNOME's 150 ms"
+cstate ".windows | all(.id != $FX_ID)" "closed window out of the model" ||
+    fail G-WINDOW-CLOSE-ANIM "the closing window stayed in the model (it could take input)"
+wait "$FX_PID" 2>/dev/null || true
+cp "$CSTATE" "$ARTIFACTS/window-effects-close.json"
+# A client that just dies (no destroy requests) leaves its last frame too.
+fx_window "Killed Proof" killed G-WINDOW-CLOSE-ANIM
+fx_log ".id == $FX_ID and .what == \"open\"" "killed proof shown" ||
+    fail G-WINDOW-CLOSE-ANIM "the second proof window never finished opening"
+kill "$FX_PID" 2>/dev/null || true
+wait "$FX_PID" 2>/dev/null || true
+fx_log ".id == $FX_ID and .what == \"close\" and .duration_ms == 150 and .frames >= 1" "disconnect close effect" ||
+    fail G-WINDOW-CLOSE-ANIM "a disconnected client's window vanished without GNOME's close effect"
+pass G-WINDOW-CLOSE-ANIM "closing windows play GNOME's effect from their last frame, outside the model, even when the client dies"
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "effects off" || fail G-WINDOW-ANIM-OFF "enable-animations false did not reach the compositor"
+fx_window "Instant Proof" off G-WINDOW-ANIM-OFF
+fx_log ".id == $FX_ID and .what == \"open\" and .duration_ms == 0 and .frames == 0" "instant open" ||
+    fail G-WINDOW-ANIM-OFF "the window animated its open with animations off"
+fx_request dialog G-WINDOW-ANIM-OFF
+fx_log ".id == $FX_ID and .what == \"dim\" and .duration_ms == 0 and .frames == 0" "instant dim" ||
+    fail G-WINDOW-ANIM-OFF "the parent animated its dim with animations off"
+fx_request close G-WINDOW-ANIM-OFF
+fx_log ".id == $FX_ID and .what == \"close\" and .duration_ms == 0 and .frames == 0" "instant close" ||
+    fail G-WINDOW-ANIM-OFF "the window animated its close with animations off"
+wait "$FX_PID" 2>/dev/null || true
+FX_PID=""
+cp "$CSTATE" "$ARTIFACTS/window-effects-off.json"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "effects on" || fail G-WINDOW-ANIM-OFF "enable-animations true did not restore motion"
+pass G-WINDOW-ANIM-OFF "with animations off windows open, dim and close instantly"
+
+# Exact mid-effect samples on the proof clock (G-ANIMATION-CLOCK): 75 ms
+# into a 150 ms effect GNOME's ease-out-expo map is at 1 - 2^-5 and the
+# ease-out-quad destroy at 3/4. Reduced motion keeps the fades and drops
+# the scale (and a dialog's map, which GNOME fades only with motion).
+fx_active() {
+    cstate "$fx_near .window_effects.active | any(.id == $FX_ID and $1)" "$2"
+}
+fx_sampled() {
+    # $1 policy label, $2 open scale [x, y] at 75 ms, $3 close scale, $4 gate
+    anim_clock 0
+    cstate '.animation_clock_manual' "frozen effects clock" || fail "$4" "the proof clock did not freeze"
+    fx_window "Sampled $1" "sampled-$1" "$4"
+    fx_active '.what == "open" and near(.elapsed_ms; 0) and .opacity == 0' "$1 open frozen at its start" ||
+        fail "$4" "the $1 open effect did not hold at its start on a frozen clock"
+    anim_clock 75
+    fx_active ".what == \"open\" and near(.elapsed_ms; 75) and near(.opacity; 0.96875) and near(.scale[0]; $(echo "$2" | jq '.[0]')) and near(.scale[1]; $(echo "$2" | jq '.[1]'))" "$1 open at 75 ms" ||
+        fail "$4" "the $1 open effect was not at GNOME's ease-out-expo midpoint 75 ms in"
+    cp "$CSTATE" "$ARTIFACTS/window-effects-$1-open-75ms.json"
+    anim_clock 150
+    fx_log ".id == $FX_ID and .what == \"open\" and near(.settled_ms; 150)" "$1 open settled at 150 ms" ||
+        fail "$4" "the $1 open effect did not settle exactly 150 ms in"
+    fx_request close "$4"
+    fx_active '.what == "close" and near(.elapsed_ms; 0) and .opacity == 1' "$1 close frozen at its start" ||
+        fail "$4" "the $1 close effect did not hold its last frame on a frozen clock"
+    anim_clock 225
+    fx_active ".what == \"close\" and near(.opacity; 0.25) and near(.scale[0]; $(echo "$3" | jq '.[0]')) and near(.scale[1]; $(echo "$3" | jq '.[1]'))" "$1 close at 75 ms" ||
+        fail "$4" "the $1 close effect was not at GNOME's ease-out-quad midpoint 75 ms in"
+    cp "$CSTATE" "$ARTIFACTS/window-effects-$1-close-75ms.json"
+    anim_clock 300
+    fx_log ".id == $FX_ID and .what == \"close\" and near(.settled_ms; 150)" "$1 close settled at 150 ms" ||
+        fail "$4" "the $1 close effect did not settle exactly 150 ms in"
+    wait "$FX_PID" 2>/dev/null || true
+    rm -f "$TUNA_ANIMATION_CLOCK"
+    cstate '.animation_clock_manual | not' "real effects clock" || fail "$4" "the proof clock did not resume"
+}
+fx_sampled full '[0.9690625, 0.9703125]' '[0.85, 0.85]' G-WINDOW-ANIM-SAMPLED
+pass G-WINDOW-ANIM-SAMPLED "on the proof clock a window is exactly at GNOME's map and destroy midpoints 75 ms in and settles at 150 ms"
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '.motion_policy == "fade-only"' "reduced motion" || fail G-WINDOW-ANIM-REDUCED "reduced-motion did not reach the compositor"
+fx_sampled reduced '[1, 1]' '[1, 1]' G-WINDOW-ANIM-REDUCED
+fx_window "Reduced Dialog Proof" reduced-dialog G-WINDOW-ANIM-REDUCED
+fx_request dialog G-WINDOW-ANIM-REDUCED
+fx_log ".what == \"open\" and .kind == \"dialog\" and .duration_ms == 0 and .id != $FX_ID" "reduced dialog maps at once" ||
+    fail G-WINDOW-ANIM-REDUCED "an attached dialog unfolded under reduced motion"
+fx_log ".id == $FX_ID and .what == \"dim\" and .duration_ms == 500 and .frames >= 1" "reduced parent still dims" ||
+    fail G-WINDOW-ANIM-REDUCED "reduced motion stopped the parent's brightness fade"
+fx_request close G-WINDOW-ANIM-REDUCED
+wait "$FX_PID" 2>/dev/null || true
+FX_PID=""
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+cstate '.motion_policy == "full"' "full motion" || fail G-WINDOW-ANIM-REDUCED "resetting reduced-motion did not restore full motion"
+pass G-WINDOW-ANIM-REDUCED "reduced motion keeps the window fades and the parent dim, drops the scale, and maps dialogs at once as GNOME does"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
