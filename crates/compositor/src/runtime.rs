@@ -1648,6 +1648,7 @@ impl Runtime {
                 .collect::<Vec<_>>(),
         });
         // Overdraw per output for the last drawn frame (#503).
+        doc["window_lifecycle"] = self.manager.window_lifecycle().to_json();
         doc["frame_cost"] = self
             .frame_costs
             .iter()
@@ -3409,6 +3410,21 @@ impl Runtime {
         // The slide first: size changes read this frame's slide offsets.
         self.step_workspace_slide();
         self.step_size_changes();
+        let now = self.animation_clock.now();
+        let allowed = !self.control.overview_open() && self.shell_swipe.is_none() && !locked;
+        let renderer = match &mut self.backend {
+            Backend::Winit(backend) => backend.renderer(),
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => &mut drm.renderer,
+        };
+        crate::window_lifecycle::step_frame(
+            &mut self.manager,
+            renderer,
+            &self.state,
+            now,
+            self.input_settings.motion,
+            allowed,
+        );
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview
@@ -4216,6 +4232,18 @@ fn scene_elements(
     // Size-change snapshots with the bottom-to-top index they sit at.
     let mut snapshots = Vec::new();
     for (id, window, geometry) in manager.render_entries() {
+        for ghost in manager
+            .window_lifecycle()
+            .ghosts()
+            .filter(|g| g.before == Some(id))
+        {
+            snapshots.extend(
+                manager
+                    .window_lifecycle()
+                    .element(ghost, renderer, view)
+                    .map(|e| (elements.len(), e)),
+            );
+        }
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
@@ -4266,6 +4294,18 @@ fn scene_elements(
                 owners.resize(elements.len(), Some(id));
                 continue;
             }
+            if let Some(frame) = manager.window_lifecycle().opening_frame(id) {
+                let r = crate::window_lifecycle::rect(geometry, frame);
+                let geo = crate::popup::window_geometry_loc(&surface);
+                let origin = view.physical(
+                    r.loc.x - f64::from(geo.x) * frame.scale.0,
+                    r.loc.y - f64::from(geo.y) * frame.scale.1,
+                );
+                let alpha = frame.alpha * manager.render_alpha(&window);
+                elements.extend(render_elements_from_surface_tree::<_,WaylandSurfaceRenderElement<_>>(renderer,&surface,origin,view.scale,alpha,Kind::Unspecified).into_iter().map(|e|smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(e,origin,frame.scale)));
+                owners.resize(elements.len(), Some(id));
+                continue;
+            }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
             let committed_width = window.geometry().size.w;
             let sx = if manager.session_mode() == crate::windows::SessionMode::Scroll
@@ -4292,6 +4332,19 @@ fn scene_elements(
             }
             owners.resize(elements.len(), Some(id));
         }
+    }
+    let rendered_ids: Vec<_> = manager.render_entries().iter().map(|e| e.0).collect();
+    for ghost in manager
+        .window_lifecycle()
+        .ghosts()
+        .filter(|g| g.before.is_none_or(|id| !rendered_ids.contains(&id)))
+    {
+        snapshots.extend(
+            manager
+                .window_lifecycle()
+                .element(ghost, renderer, view)
+                .map(|e| (elements.len(), e)),
+        );
     }
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).

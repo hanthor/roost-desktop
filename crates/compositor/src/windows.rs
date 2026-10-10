@@ -315,6 +315,7 @@ pub struct WindowManager {
     /// Maximize/tile/fullscreen transitions (#496): layout changes
     /// queue here and the runtime draws them.
     size_changes: crate::size_change::SizeChanges<crate::size_change::Snapshot>,
+    window_lifecycle: crate::window_lifecycle::Lifecycle,
 }
 
 impl WindowManager {
@@ -376,6 +377,7 @@ impl WindowManager {
             overview_held: None,
             exclusive_held: None,
             size_changes: Default::default(),
+            window_lifecycle: Default::default(),
         }
     }
 
@@ -644,6 +646,32 @@ impl WindowManager {
             .into_iter()
             .map(|(id, window, geometry)| (id, window, self.shifted(id, geometry)))
             .collect()
+    }
+
+    /// GNOME map/destroy effects accept normal windows and dialogs only.
+    pub fn lifecycle_kind(&self, id: u64) -> Option<crate::window_lifecycle::Kind> {
+        use crate::window_lifecycle::Kind;
+        let window = self.windows.get(&id)?;
+        match window.surface.underlying_surface() {
+            WindowSurface::Wayland(_) => Some(if self.transient_parent(id).is_some() {
+                Kind::Dialog
+            } else {
+                Kind::Normal
+            }),
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(surface) => match surface.window_type() {
+                None | Some(WmWindowType::Normal) => Some(Kind::Normal),
+                Some(WmWindowType::Dialog) => Some(Kind::Dialog),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn window_lifecycle(&self) -> &crate::window_lifecycle::Lifecycle {
+        &self.window_lifecycle
+    }
+    pub fn window_lifecycle_mut(&mut self) -> &mut crate::window_lifecycle::Lifecycle {
+        &mut self.window_lifecycle
     }
 
     /// Size-change transitions in flight and queued (#496).
